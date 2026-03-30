@@ -1,6 +1,6 @@
 /**
- * Shared AI handlers for Express (server.ts) and Vercel serverless (api/).
- * Lives under api/ so Vercel bundles it with serverless functions.
+ * Shared AI handlers for **Express** (`server.ts`) only.
+ * Vercel serverless duplicates this logic inside `api/ai/*.ts` (single-file bundle).
  */
 import { GoogleGenAI } from "@google/genai";
 

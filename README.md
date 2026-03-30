@@ -70,7 +70,7 @@ Web app to **generate TikTok-style ad scripts in Moroccan Darija** with **OpenAI
 
 Static hosting **without** Node (ghir `vite build`) ma-katخدمش `/api/*` — daba l-projet fih **`api/ai/transcribe.ts`** w **`api/ai/chat.ts`** (serverless) bach **nafs domain** yخدم transcription o Generi.
 
-1. Push l-repo m3a dossier **`api/`** (incl. **`api/lib/aiHandlers.ts`** — shared code for Vercel).
+1. Push l-repo m3a dossier **`api/`** (functions `api/ai/transcribe.ts` o `api/ai/chat.ts` — self-contained f Vercel).
 2. F Vercel → **Settings → Environment Variables**, zid: **`GEMINI_API_KEY`**, **`OPENAI_API_KEY`**, w kif ma bghiti **`GEMINI_TRANSCRIPTION_MODEL`**, **`OPENAI_CHAT_MODEL`**.
 3. **Redeploy** mn ba3d ma tzid l-variables.
 

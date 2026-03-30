@@ -1,5 +1,7 @@
+/**
+ * Vercel serverless: self-contained. Mirrors root `aiHandlers.ts` — update both when changing chat.
+ */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { runOpenAIChat } from "../lib/aiHandlers";
 
 export const config = {
   api: {
@@ -13,6 +15,44 @@ function applyCors(res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+async function runOpenAIChat(
+  messages: unknown[],
+  temperature: number,
+  apiKey: string,
+  modelEnv: string | undefined
+): Promise<string> {
+  const model = modelEnv?.trim() || "gpt-4o-mini";
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: typeof temperature === "number" ? temperature : 0.7,
+    }),
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text.slice(0, 600);
+    try {
+      const j = JSON.parse(text) as { error?: { message?: string } };
+      if (j.error?.message) msg = j.error.message;
+    } catch {
+      /* ignore */
+    }
+    const err = new Error(msg) as Error & { httpStatus?: number };
+    err.httpStatus = r.status;
+    throw err;
+  }
+  const j = JSON.parse(text) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return j.choices?.[0]?.message?.content ?? "";
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -42,10 +82,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { text } = await runOpenAIChat(
+    const text = await runOpenAIChat(
       messages,
       typeof temperature === "number" ? temperature : 0.7,
-      { apiKey, model: process.env.OPENAI_CHAT_MODEL }
+      apiKey,
+      process.env.OPENAI_CHAT_MODEL
     );
     return res.status(200).json({ text });
   } catch (e) {
