@@ -1,13 +1,10 @@
 import "dotenv/config";
-import { GoogleGenAI } from "@google/genai";
 import express from "express";
+import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { createRouteHandler, createUploadthing, type FileRouter } from "uploadthing/express";
-
-/** Gemini inline payload limit — stay under typical API caps */
-const GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -130,40 +127,24 @@ async function startServer() {
             "GEMINI_API_KEY nqsa 3la server. Zid GEMINI_API_KEY f .env w 3awd demmar npm run dev.",
         });
       }
-      if (req.file.buffer.length > GEMINI_INLINE_MAX_BYTES) {
-        return res.status(400).json({
-          error:
-            "Media kbir bzaf (~max 20MB l-Gemini inline). Jereb video sgher wla extract dial soute.",
-        });
-      }
-      const model =
-        process.env.GEMINI_TRANSCRIPTION_MODEL?.trim() || "gemini-2.5-flash";
       const mimeType =
         req.file.mimetype && req.file.mimetype !== ""
           ? req.file.mimetype
           : "application/octet-stream";
-      const base64Data = req.file.buffer.toString("base64");
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Data,
-            },
-          },
-          {
-            text: "Transcribe the voice script of this media in Moroccan Darija. Just the text. If there is no voice, say 'Makaynch soute f had l-video'.",
-          },
-        ],
-      });
-      const out = (response.text ?? "").trim();
-      res.json({ text: out });
+      const { text } = await runGeminiTranscription(
+        req.file.buffer,
+        mimeType,
+        {
+          apiKey,
+          model: process.env.GEMINI_TRANSCRIPTION_MODEL,
+        }
+      );
+      res.json({ text });
     } catch (e) {
       console.error("transcribe", e);
       const msg = e instanceof Error ? e.message : String(e);
-      res.status(500).json({ error: msg.slice(0, 600) });
+      const status = msg.includes("kbir") ? 400 : 500;
+      res.status(status).json({ error: msg.slice(0, 600) });
     }
   });
 
@@ -186,38 +167,25 @@ async function startServer() {
               "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
           });
         }
-        const model = process.env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini";
-        const r = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature: typeof temperature === "number" ? temperature : 0.7,
-          }),
-        });
-        const text = await r.text();
-        if (!r.ok) {
-          let msg = text.slice(0, 600);
-          try {
-            const j = JSON.parse(text) as { error?: { message?: string } };
-            if (j.error?.message) msg = j.error.message;
-          } catch {
-            /* ignore */
+        const { text: content } = await runOpenAIChat(
+          messages,
+          typeof temperature === "number" ? temperature : 0.7,
+          {
+            apiKey,
+            model: process.env.OPENAI_CHAT_MODEL,
           }
-          return res.status(r.status).json({ error: msg });
-        }
-        const j = JSON.parse(text) as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const content = j.choices?.[0]?.message?.content ?? "";
+        );
         res.json({ text: content });
       } catch (e) {
         console.error("chat", e);
-        res.status(500).json({ error: String(e) });
+        const msg = e instanceof Error ? e.message : String(e);
+        const httpStatus =
+          e instanceof Error && "httpStatus" in e
+            ? (e as Error & { httpStatus?: number }).httpStatus
+            : undefined;
+        res
+          .status(typeof httpStatus === "number" ? httpStatus : 500)
+          .json({ error: msg.slice(0, 600) });
       }
     }
   );

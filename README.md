@@ -66,6 +66,16 @@ Web app to **generate TikTok-style ad scripts in Moroccan Darija** with **OpenAI
 | `npm run start` | Serve production build (set `NODE_ENV=production` after build) |
 | `npm run lint` | Typecheck (`tsc --noEmit`) |
 
+## Deploy (Vercel / production)
+
+Static hosting **without** Node (ghir `vite build`) ma-katخدمش `/api/*` — daba l-projet fih **`api/ai/transcribe.ts`** w **`api/ai/chat.ts`** (serverless) bach **nafs domain** yخدم transcription o Generi.
+
+1. Push l-repo m3a dossier **`api/`** w **`aiHandlers.ts`** (f racine).
+2. F Vercel → **Settings → Environment Variables**, zid: **`GEMINI_API_KEY`**, **`OPENAI_API_KEY`**, w kif ma bghiti **`GEMINI_TRANSCRIPTION_MODEL`**, **`OPENAI_CHAT_MODEL`**.
+3. **Redeploy** mn ba3d ma tzid l-variables.
+
+Ila host akhor (Netlify static, S3, …) bla serverless: **deploy `server.ts`** (Railway, Render, …) w **`VITE_API_BASE_URL`** f build b URL dial had l-backend.
+
 ## Install on phone (PWA)
 
 The app registers a **minimal service worker** and ships a **web manifest** so Chrome / Edge / Android can offer **Install** (add to home screen). A popup invites install when the browser supports it. **iOS Safari** has no install button: the popup explains **Share → Add to Home Screen**. Requires **HTTPS** in production (localhost is OK for dev).

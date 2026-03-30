@@ -822,7 +822,7 @@ export default function App() {
       if (!transcribeRes.ok) {
         if (transcribeRes.status === 404) {
           throw new Error(
-            "API 404: ma-l9inach /api f had l-port. 7ell `npm run dev` w dkhoul http://localhost:3000 — wla khalli `tsx server.ts` khddam 3la 3000 m3a Vite."
+            "API 404: ma-l9inach /api/ai/transcribe. Production (Vercel): redploy + zid GEMINI_API_KEY f Env Variables + dossier api/ f repo. Local: npm run dev 3la localhost:3000."
           );
         }
         throw new Error(
