@@ -37,6 +37,7 @@ import Markdown from 'react-markdown';
 import localforage from 'localforage';
 
 import type { User } from "@supabase/supabase-js";
+import { apiUrl } from "./apiBase";
 import { supabase } from "./supabase";
 import { uploadFiles } from './utils/uploadthing';
 
@@ -44,6 +45,11 @@ import { uploadFiles } from './utils/uploadthing';
 function createdAtFromIso(iso: string | null | undefined) {
   const t = iso ? new Date(iso).getTime() : 0;
   return { toMillis: () => t };
+}
+
+/** Same suffix as shown in UI as `#xxxxx` (last 5 chars of history UUID). */
+function videoPageDisplayId(fullHistoryId: string): string {
+  return fullHistoryId.slice(-5);
 }
 
 function base64ToBlob(base64: string, mimeType: string): Blob {
@@ -64,17 +70,21 @@ function transcriptionErrorMessage(err: unknown): string {
   const low = d.toLowerCase();
   if (!d) return "Mouchkil f-transcription. T2ked men connexion wla jereb video sgher.";
   if (
-    low.includes("openai_api_key") ||
-    low.includes("api key") ||
-    low.includes("invalid api") ||
-    low.includes("incorrect api key") ||
-    low.includes("unauthorized")
+    d.includes("GEMINI_API_KEY") ||
+    low.includes("api key not valid") ||
+    low.includes("invalid api key") ||
+    (low.includes("api key") && low.includes("google"))
   )
-    return "OPENAI_API_KEY ma-shi s7i7a wla nqsa. Zidha f .env (racine dial l-projet) w 3awd demmar npm run dev.";
-  if (low.includes("429") || low.includes("quota") || low.includes("rate limit"))
-    return "Quota / rate limit dial OpenAI t3ba. Jereb men ba3d wla chouf billing f platform.openai.com.";
+    return "GEMINI_API_KEY ma-shi s7i7a wla nqsa. Zidha f .env (racine dial l-projet) w 3awd demmar npm run dev.";
+  if (
+    low.includes("429") ||
+    low.includes("quota") ||
+    low.includes("rate limit") ||
+    low.includes("resource exhausted")
+  )
+    return "Quota / rate limit dial Gemini (transcription). Jereb men ba3d wla chouf ai.google.dev / billing.";
   if (low.includes("not found") && low.includes("model"))
-    return "Model ma-m7aynach. 7awel OPENAI_WHISPER_MODEL=whisper-1 f .env.";
+    return "Model ma-m7aynach. 7awel GEMINI_TRANSCRIPTION_MODEL=gemini-2.5-flash f .env.";
   return `Transcription: ${d}`;
 }
 
@@ -460,6 +470,9 @@ export default function App() {
   const [renameHistoryValue, setRenameHistoryValue] = useState("");
   const [missingImagesDialog, setMissingImagesDialog] = useState<string[] | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginConfirmPassword, setLoginConfirmPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [loginSending, setLoginSending] = useState(false);
   const [loginMessage, setLoginMessage] = useState<string | null>(null);
 
@@ -643,27 +656,62 @@ export default function App() {
     };
   }, [refreshUserData]);
 
-  const handleSendMagicLink = async () => {
+  const handlePasswordAuth = async () => {
     const email = loginEmail.trim();
     if (!email) {
       setError("3afak dkhel l-email.");
+      return;
+    }
+    if (!loginPassword) {
+      setError("3afak dkhel l-password.");
       return;
     }
     setLoginSending(true);
     setLoginMessage(null);
     setError(null);
     try {
-      const redirectTo =
-        typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : undefined;
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: redirectTo },
-      });
-      if (error) throw error;
-      setLoginMessage("Tsift lik l-link f l-email. Dkhel l-inbox wla spam.");
+      if (authMode === "signup") {
+        if (loginPassword !== loginConfirmPassword) {
+          setError("L-passwords ma-mtchawch.");
+          setLoginSending(false);
+          return;
+        }
+        if (loginPassword.length < 6) {
+          setError("L-password khas ykon f a9al 6 d l-7roof.");
+          setLoginSending(false);
+          return;
+        }
+        const redirectTo =
+          typeof window !== "undefined"
+            ? `${window.location.origin}${window.location.pathname}`
+            : undefined;
+        const { data, error: signErr } = await supabase.auth.signUp({
+          email,
+          password: loginPassword,
+          options: { emailRedirectTo: redirectTo },
+        });
+        if (signErr) throw signErr;
+        if (data.session) {
+          setLoginMessage(null);
+        } else {
+          setLoginMessage(
+            "Compte t-crea. Chof l-email ila khassk t-confirmer l-compte f Supabase."
+          );
+        }
+      } else {
+        const { error: signInErr } = await supabase.auth.signInWithPassword({
+          email,
+          password: loginPassword,
+        });
+        if (signInErr) throw signInErr;
+      }
     } catch (err) {
       console.error(err);
-      setError("Mouchkil f-login. Jereb tani.");
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Mouchkil f-login. Jereb tani.";
+      setError(msg);
     } finally {
       setLoginSending(false);
     }
@@ -753,9 +801,9 @@ export default function App() {
         fileToSend = new File([blob], "audio.wav", { type: "audio/wav" });
       } catch (audioErr) {
         console.warn("Audio extraction failed, falling back to full media", audioErr);
-        if (pendingVideo.file.size > 25 * 1024 * 1024) {
+        if (pendingVideo.file.size > 20 * 1024 * 1024) {
           throw new Error(
-            "Video kbir bzaf o ma9dernach njebdo mno soute. Jereb video sgher men 25MB (limit dial OpenAI Whisper)."
+            "Video kbir bzaf o ma9dernach njebdo mno soute. Jereb video sgher men 20MB (limit dial Gemini transcription)."
           );
         }
         fileToSend = pendingVideo.file;
@@ -763,7 +811,7 @@ export default function App() {
 
       const form = new FormData();
       form.append("file", fileToSend);
-      const transcribeRes = await fetch("/api/ai/transcribe", {
+      const transcribeRes = await fetch(apiUrl("/api/ai/transcribe"), {
         method: "POST",
         body: form,
       });
@@ -772,6 +820,11 @@ export default function App() {
         error?: string;
       };
       if (!transcribeRes.ok) {
+        if (transcribeRes.status === 404) {
+          throw new Error(
+            "API 404: l-server ma-khdamch. Demmar b `npm run dev` (http://localhost:3000) wla `tsx server.ts` + Vite. Ma-tkhdemch ghir `vite` bohdo bla Express."
+          );
+        }
         throw new Error(
           transcribeJson.error ||
             `Transcription HTTP ${transcribeRes.status}`
@@ -919,7 +972,7 @@ export default function App() {
         ${styleInstruction}
       `;
 
-      const chatRes = await fetch("/api/ai/chat", {
+      const chatRes = await fetch(apiUrl("/api/ai/chat"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1071,7 +1124,38 @@ export default function App() {
     }
   };
 
-  const saveWebhookResponse = async (data: any, rawText: string | null, videoUrl: string | null, productId: string | null) => {
+  const createVideoHistoryPending = async (
+    productId: string | null
+  ): Promise<string | null> => {
+    if (!user) return null;
+    try {
+      const { data: inserted, error } = await supabase
+        .from("video_history")
+        .insert({
+          owner_id: user.id,
+          event_at: new Date().toISOString(),
+          data: null,
+          raw_text: null,
+          video_url: null,
+          product_id: productId,
+        })
+        .select("id")
+        .single();
+      if (error) throw error;
+      await refreshUserData(user.id);
+      return inserted?.id ?? null;
+    } catch (err) {
+      handleDbError(err, OperationType.CREATE, "video_history");
+      return null;
+    }
+  };
+
+  const finalizeVideoHistory = async (
+    historyId: string,
+    data: any,
+    rawText: string | null,
+    videoUrl: string | null
+  ) => {
     if (!user) return;
     let dataJson: unknown = null;
     if (data != null) {
@@ -1086,23 +1170,28 @@ export default function App() {
       }
     }
     try {
-      const { data: inserted, error } = await supabase
+      const { error } = await supabase
         .from("video_history")
-        .insert({
-          owner_id: user.id,
+        .update({
           event_at: new Date().toISOString(),
           data: dataJson,
           raw_text: rawText,
           video_url: videoUrl,
-          product_id: productId,
         })
-        .select("id")
-        .single();
+        .eq("id", historyId);
       if (error) throw error;
-      if (inserted?.id) setSelectedHistoryId(inserted.id);
       await refreshUserData(user.id);
     } catch (err) {
-      handleDbError(err, OperationType.CREATE, "video_history");
+      handleDbError(err, OperationType.UPDATE, `video_history/${historyId}`);
+    }
+  };
+
+  const rollbackVideoHistory = async (historyId: string) => {
+    try {
+      await supabase.from("video_history").delete().eq("id", historyId);
+      if (user) await refreshUserData(user.id);
+    } catch (e) {
+      console.error("rollbackVideoHistory", e);
     }
   };
 
@@ -1207,7 +1296,7 @@ export default function App() {
         script: webhookResponseData.script || generatedScript,
         scenes: scenesPayload,
         timestamp: new Date().toISOString(),
-        videoId: selectedHistoryId
+        videoId: videoPageDisplayId(selectedHistoryId),
       };
 
       const response = await fetch(imagesWebhookUrl, {
@@ -1257,127 +1346,153 @@ export default function App() {
   };
 
   const sendToWebhook = async () => {
-      if (!webhookUrl || !generatedScript || generatedScript === "Smah lina, ma9dernach n-generiw script.") return;
+    if (!webhookUrl || !generatedScript || generatedScript === "Smah lina, ma9dernach n-generiw script.") return;
+    if (!user) return;
 
-      setIsSendingWebhook(true);
-      setWebhookStatus('idle');
-      setGeneratedVideoUrl(null);
-      setWebhookResponseText(null);
-      setWebhookResponseData(null);
-      setActiveTab('videoResult');
+    setIsSendingWebhook(true);
+    setWebhookStatus("idle");
+    setGeneratedVideoUrl(null);
+    setWebhookResponseText(null);
+    setWebhookResponseData(null);
+    setActiveTab("videoResult");
 
-      try {
-        const response = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            productId: selectedProductId,
-            duration,
-            sceneCount,
-            customPrompt,
-            script: generatedScript,
-            scenes: generatedScenes ? generatedScenes.map(s => JSON.stringify(s)).join(', ') : "",
-            modelImageUrl,
-            productImageUrl,
-            backgroundImageUrl,
-            useModelRef,
-            useProductRef,
-            useBackgroundRef,
-            timestamp: new Date().toISOString()
-          })
-        });
+    const historyId = await createVideoHistoryPending(selectedProductId);
+    if (!historyId) {
+      setIsSendingWebhook(false);
+      return;
+    }
+    setSelectedHistoryId(historyId);
+    const webhookVideoId = videoPageDisplayId(historyId);
 
-        if (response.ok) {
-          setWebhookStatus('success');
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          productId: selectedProductId,
+          duration,
+          sceneCount,
+          customPrompt,
+          script: generatedScript,
+          scenes: generatedScenes ? generatedScenes.map((s) => JSON.stringify(s)).join(", ") : "",
+          modelImageUrl,
+          productImageUrl,
+          backgroundImageUrl,
+          useModelRef,
+          useProductRef,
+          useBackgroundRef,
+          timestamp: new Date().toISOString(),
+          videoId: webhookVideoId,
+        }),
+      });
+
+      if (response.ok) {
+        setWebhookStatus("success");
+        try {
+          const text = await response.text();
           try {
-             const text = await response.text();
-             try {
-               const data = JSON.parse(text);
-               let url = null;
-               if (typeof data === 'string') {
-                 url = data;
-               } else if (data && typeof data === 'object') {
-                 url = data.videoUrl || data.url || data.fileUrl || data.result || data.video || data.link || data.output;
-               }
-               
-               if (url && typeof url === 'string' && url.startsWith('http')) {
-                 setGeneratedVideoUrl(url);
-                 setWebhookResponseText(null);
-                 setWebhookResponseData(null);
-                 saveWebhookResponse(null, null, url, selectedProductId);
-               } else {
-                 console.log("Webhook response JSON:", data);
-                 // If no URL found but we got a response, maybe show the raw response or a success message
-                 if (text.startsWith('http')) {
-                   setGeneratedVideoUrl(text);
-                   setWebhookResponseText(null);
-                   setWebhookResponseData(null);
-                   saveWebhookResponse(null, null, text, selectedProductId);
-                 } else {
-                   setWebhookResponseText(text);
-                   
-                   // Try to parse nested JSON strings if they exist
-                   let parsedData = { ...data };
-                   if (typeof parsedData.script === 'string' && (parsedData.script.startsWith('{') || parsedData.script.startsWith('['))) {
-                     try { parsedData.script = JSON.parse(parsedData.script); } catch(e) {}
-                   }
-                   if (typeof parsedData.scenes === 'string') {
-                     let s = parsedData.scenes.trim();
-                     s = s.replace(/\n/g, ' ').replace(/\r/g, '');
-                     if (s.startsWith('{') && s.endsWith('}')) {
-                       s = `[${s}]`;
-                     }
-                     try { 
-                       const parsed = JSON.parse(s); 
-                       if (Array.isArray(parsed)) parsedData.scenes = parsed;
-                       else if (typeof parsed === 'object' && parsed !== null) parsedData.scenes = [parsed];
-                     } catch(e) {
-                       console.error("Failed to parse scenes in sendToWebhook:", e);
-                     }
-                   }
-                   setWebhookResponseData(parsedData);
-                   saveWebhookResponse(parsedData, text, null, selectedProductId);
-                 }
-               }
-             } catch (parseError) {
-               // Not JSON, handle as plain text or broken JSON
-               const brokenData = parseBrokenWebhookResponse(text);
-               if (brokenData) {
-                 setWebhookResponseData(brokenData);
-                 setWebhookResponseText(null);
-                 saveWebhookResponse(brokenData, text, null, selectedProductId);
-               } else {
-                 const cleanText = text.replace(/^["']|["']$/g, '').trim();
-                 if (cleanText.startsWith('http')) {
-                   setGeneratedVideoUrl(cleanText);
-                   setWebhookResponseText(null);
-                   setWebhookResponseData(null);
-                   saveWebhookResponse(null, null, cleanText, selectedProductId);
-                 } else {
-                   console.log("Webhook raw response:", text);
-                   setWebhookResponseText(text);
-                   setWebhookResponseData(null);
-                   saveWebhookResponse(null, text, null, selectedProductId);
-                 }
-               }
-             }
-          } catch (e) {
-             console.error("Error reading response:", e);
+            const data = JSON.parse(text);
+            let url = null;
+            if (typeof data === "string") {
+              url = data;
+            } else if (data && typeof data === "object") {
+              url =
+                data.videoUrl ||
+                data.url ||
+                data.fileUrl ||
+                data.result ||
+                data.video ||
+                data.link ||
+                data.output;
+            }
+
+            if (url && typeof url === "string" && url.startsWith("http")) {
+              setGeneratedVideoUrl(url);
+              setWebhookResponseText(null);
+              setWebhookResponseData(null);
+              await finalizeVideoHistory(historyId, null, null, url);
+            } else {
+              console.log("Webhook response JSON:", data);
+              if (text.startsWith("http")) {
+                setGeneratedVideoUrl(text);
+                setWebhookResponseText(null);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, null, text);
+              } else {
+                setWebhookResponseText(text);
+
+                let parsedData = { ...data };
+                if (
+                  typeof parsedData.script === "string" &&
+                  (parsedData.script.startsWith("{") || parsedData.script.startsWith("["))
+                ) {
+                  try {
+                    parsedData.script = JSON.parse(parsedData.script);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (typeof parsedData.scenes === "string") {
+                  let s = parsedData.scenes.trim();
+                  s = s.replace(/\n/g, " ").replace(/\r/g, "");
+                  if (s.startsWith("{") && s.endsWith("}")) {
+                    s = `[${s}]`;
+                  }
+                  try {
+                    const parsed = JSON.parse(s);
+                    if (Array.isArray(parsed)) parsedData.scenes = parsed;
+                    else if (typeof parsed === "object" && parsed !== null)
+                      parsedData.scenes = [parsed];
+                  } catch (e) {
+                    console.error("Failed to parse scenes in sendToWebhook:", e);
+                  }
+                }
+                setWebhookResponseData(parsedData);
+                await finalizeVideoHistory(historyId, parsedData, text, null);
+              }
+            }
+          } catch {
+            const brokenData = parseBrokenWebhookResponse(text);
+            if (brokenData) {
+              setWebhookResponseData(brokenData);
+              setWebhookResponseText(null);
+              await finalizeVideoHistory(historyId, brokenData, text, null);
+            } else {
+              const cleanText = text.replace(/^["']|["']$/g, "").trim();
+              if (cleanText.startsWith("http")) {
+                setGeneratedVideoUrl(cleanText);
+                setWebhookResponseText(null);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, null, cleanText);
+              } else {
+                console.log("Webhook raw response:", text);
+                setWebhookResponseText(text);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, text, null);
+              }
+            }
           }
-          setTimeout(() => setWebhookStatus('idle'), 3000);
-        } else {
-          setWebhookStatus('error');
-          setTimeout(() => setWebhookStatus('idle'), 3000);
+        } catch (e) {
+          console.error("Error reading response:", e);
         }
-      } catch (e) {
-        console.error("Failed to send to webhook:", e);
-        setWebhookStatus('error');
-        setTimeout(() => setWebhookStatus('idle'), 3000);
-      } finally {
-        setIsSendingWebhook(false);
+        setTimeout(() => setWebhookStatus("idle"), 3000);
+      } else {
+        await rollbackVideoHistory(historyId);
+        setSelectedHistoryId(null);
+        setWebhookStatus("error");
+        setTimeout(() => setWebhookStatus("idle"), 3000);
       }
+    } catch (e) {
+      console.error("Failed to send to webhook:", e);
+      await rollbackVideoHistory(historyId);
+      setSelectedHistoryId(null);
+      setWebhookStatus("error");
+      setTimeout(() => setWebhookStatus("idle"), 3000);
+    } finally {
+      setIsSendingWebhook(false);
+    }
   };
 
   const saveScript = async () => {
@@ -1523,117 +1638,146 @@ export default function App() {
 
   const sendSavedScriptToWebhook = async () => {
     if (!webhookUrl || !scriptToSend) return;
+    if (!user) return;
+    const st = scriptToSend;
 
     setIsSendingWebhook(true);
-    setWebhookStatus('idle');
+    setWebhookStatus("idle");
     setGeneratedVideoUrl(null);
     setWebhookResponseText(null);
     setWebhookResponseData(null);
-    setScriptToSend(null); // Close modal
-    setActiveTab('videoResult');
+    setScriptToSend(null);
+    setActiveTab("videoResult");
+
+    const historyId = await createVideoHistoryPending(st.productId);
+    if (!historyId) {
+      setIsSendingWebhook(false);
+      return;
+    }
+    setSelectedHistoryId(historyId);
+    const webhookVideoId = videoPageDisplayId(historyId);
 
     try {
       const response = await fetch(webhookUrl, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          productId: scriptToSend.productId,
-          customPrompt: scriptToSend.customPrompt,
-          script: scriptToSend.content,
-          scenes: scriptToSend.scenes ? scriptToSend.scenes.map(s => JSON.stringify(s)).join(', ') : "",
+          productId: st.productId,
+          customPrompt: st.customPrompt,
+          script: st.content,
+          scenes: st.scenes ? st.scenes.map((s) => JSON.stringify(s)).join(", ") : "",
           modelImageUrl: savedScriptModelImageUrl,
           productImageUrl: savedScriptProductImageUrl,
           backgroundImageUrl: savedScriptBackgroundImageUrl,
-          timestamp: new Date().toISOString()
-        })
+          timestamp: new Date().toISOString(),
+          videoId: webhookVideoId,
+        }),
       });
 
       if (response.ok) {
-        setWebhookStatus('success');
+        setWebhookStatus("success");
         try {
-           const text = await response.text();
-           try {
-             const data = JSON.parse(text);
-             let url = null;
-             if (typeof data === 'string') {
-               url = data;
-             } else if (data && typeof data === 'object') {
-               url = data.videoUrl || data.url || data.fileUrl || data.result || data.video || data.link || data.output;
-             }
-             
-             if (url && typeof url === 'string' && url.startsWith('http')) {
-               setGeneratedVideoUrl(url);
-               setWebhookResponseText(null);
-               setWebhookResponseData(null);
-               saveWebhookResponse(null, null, url, scriptToSend.productId);
-             } else {
-               console.log("Webhook response JSON:", data);
-               if (text.startsWith('http')) {
-                 setGeneratedVideoUrl(text);
-                 setWebhookResponseText(null);
-                 setWebhookResponseData(null);
-                 saveWebhookResponse(null, null, text, scriptToSend.productId);
-               } else {
-                 setWebhookResponseText(text);
-                 
-                 // Try to parse nested JSON strings if they exist
-                 let parsedData = { ...data };
-                 if (typeof parsedData.script === 'string' && (parsedData.script.startsWith('{') || parsedData.script.startsWith('['))) {
-                   try { parsedData.script = JSON.parse(parsedData.script); } catch(e) {}
-                 }
-                 if (typeof parsedData.scenes === 'string') {
-                   let s = parsedData.scenes.trim();
-                   s = s.replace(/\n/g, ' ').replace(/\r/g, '');
-                   if (s.startsWith('{') && s.endsWith('}')) {
-                     s = `[${s}]`;
-                   }
-                   try { 
-                     const parsed = JSON.parse(s); 
-                     if (Array.isArray(parsed)) parsedData.scenes = parsed;
-                     else if (typeof parsed === 'object' && parsed !== null) parsedData.scenes = [parsed];
-                   } catch(e) {
-                     console.error("Failed to parse scenes in sendSavedScriptToWebhook:", e);
-                   }
-                 }
-                 setWebhookResponseData(parsedData);
-                 saveWebhookResponse(parsedData, text, null, scriptToSend.productId);
-               }
-             }
-           } catch (parseError) {
-             const brokenData = parseBrokenWebhookResponse(text);
-             if (brokenData) {
-               setWebhookResponseData(brokenData);
-               setWebhookResponseText(null);
-               saveWebhookResponse(brokenData, text, null, scriptToSend.productId);
-             } else {
-               const cleanText = text.replace(/^["']|["']$/g, '').trim();
-               if (cleanText.startsWith('http')) {
-                 setGeneratedVideoUrl(cleanText);
-                 setWebhookResponseText(null);
-                 setWebhookResponseData(null);
-                 saveWebhookResponse(null, null, cleanText, scriptToSend.productId);
-               } else {
-                 console.log("Webhook raw response:", text);
-                 setWebhookResponseText(text);
-                 setWebhookResponseData(null);
-                 saveWebhookResponse(null, text, null, scriptToSend.productId);
-               }
-             }
-           }
+          const text = await response.text();
+          try {
+            const data = JSON.parse(text);
+            let url = null;
+            if (typeof data === "string") {
+              url = data;
+            } else if (data && typeof data === "object") {
+              url =
+                data.videoUrl ||
+                data.url ||
+                data.fileUrl ||
+                data.result ||
+                data.video ||
+                data.link ||
+                data.output;
+            }
+
+            if (url && typeof url === "string" && url.startsWith("http")) {
+              setGeneratedVideoUrl(url);
+              setWebhookResponseText(null);
+              setWebhookResponseData(null);
+              await finalizeVideoHistory(historyId, null, null, url);
+            } else {
+              console.log("Webhook response JSON:", data);
+              if (text.startsWith("http")) {
+                setGeneratedVideoUrl(text);
+                setWebhookResponseText(null);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, null, text);
+              } else {
+                setWebhookResponseText(text);
+
+                let parsedData = { ...data };
+                if (
+                  typeof parsedData.script === "string" &&
+                  (parsedData.script.startsWith("{") || parsedData.script.startsWith("["))
+                ) {
+                  try {
+                    parsedData.script = JSON.parse(parsedData.script);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (typeof parsedData.scenes === "string") {
+                  let s = parsedData.scenes.trim();
+                  s = s.replace(/\n/g, " ").replace(/\r/g, "");
+                  if (s.startsWith("{") && s.endsWith("}")) {
+                    s = `[${s}]`;
+                  }
+                  try {
+                    const parsed = JSON.parse(s);
+                    if (Array.isArray(parsed)) parsedData.scenes = parsed;
+                    else if (typeof parsed === "object" && parsed !== null)
+                      parsedData.scenes = [parsed];
+                  } catch (e) {
+                    console.error("Failed to parse scenes in sendSavedScriptToWebhook:", e);
+                  }
+                }
+                setWebhookResponseData(parsedData);
+                await finalizeVideoHistory(historyId, parsedData, text, null);
+              }
+            }
+          } catch {
+            const brokenData = parseBrokenWebhookResponse(text);
+            if (brokenData) {
+              setWebhookResponseData(brokenData);
+              setWebhookResponseText(null);
+              await finalizeVideoHistory(historyId, brokenData, text, null);
+            } else {
+              const cleanText = text.replace(/^["']|["']$/g, "").trim();
+              if (cleanText.startsWith("http")) {
+                setGeneratedVideoUrl(cleanText);
+                setWebhookResponseText(null);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, null, cleanText);
+              } else {
+                console.log("Webhook raw response:", text);
+                setWebhookResponseText(text);
+                setWebhookResponseData(null);
+                await finalizeVideoHistory(historyId, null, text, null);
+              }
+            }
+          }
         } catch (e) {
-           console.error("Error reading response:", e);
+          console.error("Error reading response:", e);
         }
-        setTimeout(() => setWebhookStatus('idle'), 3000);
+        setTimeout(() => setWebhookStatus("idle"), 3000);
       } else {
-        setWebhookStatus('error');
-        setTimeout(() => setWebhookStatus('idle'), 3000);
+        await rollbackVideoHistory(historyId);
+        setSelectedHistoryId(null);
+        setWebhookStatus("error");
+        setTimeout(() => setWebhookStatus("idle"), 3000);
       }
     } catch (e) {
       console.error("Failed to send to webhook:", e);
-      setWebhookStatus('error');
-      setTimeout(() => setWebhookStatus('idle'), 3000);
+      await rollbackVideoHistory(historyId);
+      setSelectedHistoryId(null);
+      setWebhookStatus("error");
+      setTimeout(() => setWebhookStatus("idle"), 3000);
     } finally {
       setIsSendingWebhook(false);
       setSavedScriptModelImageFile(null);
@@ -1660,6 +1804,36 @@ export default function App() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight">Video Flow</h1>
           <p className="text-gray-500">Kteb scripts dial TikTok ads b-Darija derya o b-style dialk.</p>
+          <div className="flex rounded-xl bg-gray-100 p-1 text-sm font-medium">
+            <button
+              type="button"
+              className={cn(
+                "flex-1 py-2 rounded-lg transition-colors",
+                authMode === "login" ? "bg-white shadow text-gray-900" : "text-gray-500"
+              )}
+              onClick={() => {
+                setAuthMode("login");
+                setError(null);
+                setLoginMessage(null);
+              }}
+            >
+              Dkhol
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "flex-1 py-2 rounded-lg transition-colors",
+                authMode === "signup" ? "bg-white shadow text-gray-900" : "text-gray-500"
+              )}
+              onClick={() => {
+                setAuthMode("signup");
+                setError(null);
+                setLoginMessage(null);
+              }}
+            >
+              Compte jdid
+            </button>
+          </div>
           <div className="space-y-3 text-left">
             <label className="block text-sm font-medium text-gray-700">Email</label>
             <input
@@ -1670,6 +1844,28 @@ export default function App() {
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
               autoComplete="email"
             />
+            <label className="block text-sm font-medium text-gray-700">Password</label>
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+              autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+            />
+            {authMode === "signup" && (
+              <>
+                <label className="block text-sm font-medium text-gray-700">3awd l-password</label>
+                <input
+                  type="password"
+                  value={loginConfirmPassword}
+                  onChange={(e) => setLoginConfirmPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+                  autoComplete="new-password"
+                />
+              </>
+            )}
           </div>
           {loginMessage && (
             <p className="text-sm text-green-600 bg-green-50 rounded-xl px-3 py-2">{loginMessage}</p>
@@ -1679,7 +1875,7 @@ export default function App() {
           )}
           <button
             type="button"
-            onClick={() => void handleSendMagicLink()}
+            onClick={() => void handlePasswordAuth()}
             disabled={loginSending}
             className="w-full py-4 bg-black text-white rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-gray-800 transition-all disabled:opacity-60"
           >
@@ -1688,7 +1884,11 @@ export default function App() {
             ) : (
               <LogIn className="w-5 h-5" />
             )}
-            {loginSending ? "Kaytsift..." : "Sift liya magic link"}
+            {loginSending
+              ? "Sandani..."
+              : authMode === "signup"
+                ? "Sijel"
+                : "Dkhol"}
           </button>
         </div>
       </div>

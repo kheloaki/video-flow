@@ -1,9 +1,13 @@
 import "dotenv/config";
+import { GoogleGenAI } from "@google/genai";
 import express from "express";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { createRouteHandler, createUploadthing, type FileRouter } from "uploadthing/express";
+
+/** Gemini inline payload limit — stay under typical API caps */
+const GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -94,46 +98,47 @@ async function startServer() {
       if (!req.file?.buffer) {
         return res.status(400).json({ error: "Missing file" });
       }
-      const apiKey = process.env.OPENAI_API_KEY?.trim();
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
       if (!apiKey) {
         return res.status(500).json({
           error:
-            "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
+            "GEMINI_API_KEY nqsa 3la server. Zid GEMINI_API_KEY f .env w 3awd demmar npm run dev.",
         });
       }
-      const model = process.env.OPENAI_WHISPER_MODEL?.trim() || "whisper-1";
-      const form = new FormData();
-      const blob = new Blob([new Uint8Array(req.file.buffer)], {
-        type: req.file.mimetype || "application/octet-stream",
-      });
-      form.append("file", blob, req.file.originalname || "media.wav");
-      form.append("model", model);
-      form.append("language", "ar");
-      form.append(
-        "prompt",
-        "Moroccan Darija dialect. Transcribe spoken words accurately."
-      );
-      const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-      });
-      const text = await r.text();
-      if (!r.ok) {
-        let msg = text.slice(0, 500);
-        try {
-          const j = JSON.parse(text) as { error?: { message?: string } };
-          if (j.error?.message) msg = j.error.message;
-        } catch {
-          /* ignore */
-        }
-        return res.status(r.status).json({ error: msg });
+      if (req.file.buffer.length > GEMINI_INLINE_MAX_BYTES) {
+        return res.status(400).json({
+          error:
+            "Media kbir bzaf (~max 20MB l-Gemini inline). Jereb video sgher wla extract dial soute.",
+        });
       }
-      const j = JSON.parse(text) as { text?: string };
-      res.json({ text: (j.text ?? "").trim() });
+      const model =
+        process.env.GEMINI_TRANSCRIPTION_MODEL?.trim() || "gemini-2.5-flash";
+      const mimeType =
+        req.file.mimetype && req.file.mimetype !== ""
+          ? req.file.mimetype
+          : "application/octet-stream";
+      const base64Data = req.file.buffer.toString("base64");
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            inlineData: {
+              mimeType,
+              data: base64Data,
+            },
+          },
+          {
+            text: "Transcribe the voice script of this media in Moroccan Darija. Just the text. If there is no voice, say 'Makaynch soute f had l-video'.",
+          },
+        ],
+      });
+      const out = (response.text ?? "").trim();
+      res.json({ text: out });
     } catch (e) {
       console.error("transcribe", e);
-      res.status(500).json({ error: String(e) });
+      const msg = e instanceof Error ? e.message : String(e);
+      res.status(500).json({ error: msg.slice(0, 600) });
     }
   });
 

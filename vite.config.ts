@@ -12,5 +12,12 @@ export default defineConfig({
   },
   server: {
     hmr: process.env.DISABLE_HMR !== 'true',
+    // If you run `vite` on :5173, forward /api to Express on :3000 (run `tsx server.ts` in another terminal).
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
+    },
   },
 });
