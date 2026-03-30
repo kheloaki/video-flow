@@ -1,8 +1,11 @@
 /**
  * Vercel serverless: UploadThing route. Static deploy has no Express — keep router in sync with `server.ts`.
+ *
+ * Use a buffered body for the Web `Request` — `Readable.toWeb(req)` on Vercel often never completes,
+ * which leaves the client `fetch` pending forever (spinner never stops).
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { Readable } from "node:stream";
+import { buffer } from "node:stream/consumers";
 import {
   createRouteHandler,
   createUploadthing,
@@ -44,20 +47,24 @@ function headersFromIncoming(req: VercelRequest): Headers {
   return h;
 }
 
-function toWebRequest(req: VercelRequest): Request {
+async function toWebRequest(req: VercelRequest): Promise<Request> {
   const protocol = (req.headers["x-forwarded-proto"] as string) || "https";
   const host = req.headers.host || "localhost";
   const url = `${protocol}://${host}${req.url}`;
 
-  const init: RequestInit & { duplex?: "half" } = {
-    method: req.method || "GET",
-    headers: headersFromIncoming(req),
-  };
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    init.duplex = "half";
-    init.body = Readable.toWeb(req) as BodyInit;
+  const method = req.method || "GET";
+  const headers = headersFromIncoming(req);
+
+  if (method === "GET" || method === "HEAD") {
+    return new Request(url, { method, headers });
   }
-  return new Request(url, init);
+
+  const buf = await buffer(req);
+  return new Request(url, {
+    method,
+    headers,
+    body: buf.length > 0 ? buf : undefined,
+  });
 }
 
 async function sendWebResponse(res: VercelResponse, webRes: Response) {
@@ -81,7 +88,7 @@ export default async function uploadthing(
   }
 
   try {
-    const webRes = await handleRequest(toWebRequest(req));
+    const webRes = await handleRequest(await toWebRequest(req));
     await sendWebResponse(res, webRes);
   } catch (e) {
     console.error(e);
