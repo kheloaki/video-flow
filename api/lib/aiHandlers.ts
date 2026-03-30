@@ -1,5 +1,6 @@
 /**
  * Shared AI handlers for Express (server.ts) and Vercel serverless (api/).
+ * Lives under api/ so Vercel bundles it with serverless functions.
  */
 import { GoogleGenAI } from "@google/genai";
 

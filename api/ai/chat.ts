@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { runOpenAIChat } from "../../aiHandlers";
+import { runOpenAIChat } from "../lib/aiHandlers";
 
 export const config = {
   api: {

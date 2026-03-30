@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
+import { runGeminiTranscription, runOpenAIChat } from "./api/lib/aiHandlers";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import formidable from "formidable";
 import fs from "fs/promises";
-import { runGeminiTranscription } from "../../aiHandlers";
+import { runGeminiTranscription } from "../lib/aiHandlers";
 
 export const config = {
   api: {
