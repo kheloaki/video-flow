@@ -29,6 +29,31 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Allow browser calls from Vite dev (:5173) while API stays on :3000
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (
+      origin &&
+      /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin)
+    ) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,DELETE,PUT,PATCH,OPTIONS"
+      );
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        req.header("Access-Control-Request-Headers") ||
+          "Content-Type, Authorization"
+      );
+    }
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   // UploadThing API Route
   app.use(
     "/api/uploadthing",

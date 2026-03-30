@@ -822,7 +822,7 @@ export default function App() {
       if (!transcribeRes.ok) {
         if (transcribeRes.status === 404) {
           throw new Error(
-            "API 404: l-server ma-khdamch. Demmar b `npm run dev` (http://localhost:3000) wla `tsx server.ts` + Vite. Ma-tkhdemch ghir `vite` bohdo bla Express."
+            "API 404: ma-l9inach /api f had l-port. 7ell `npm run dev` w dkhoul http://localhost:3000 — wla khalli `tsx server.ts` khddam 3la 3000 m3a Vite."
           );
         }
         throw new Error(

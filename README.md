@@ -53,7 +53,9 @@ Web app to **generate TikTok-style ad scripts in Moroccan Darija** with **OpenAI
    npm run dev
    ```
 
-   Open [http://localhost:3000](http://localhost:3000).
+   Open [http://localhost:3000](http://localhost:3000) (Express + Vite together — **recommended**).
+
+   If you use **`vite` alone** on port 5173, run **`tsx server.ts`** in another terminal so the API stays on **:3000**; the app will call `http://127.0.0.1:3000/api/...` automatically in dev.
 
 ## Scripts
 
@@ -63,6 +65,10 @@ Web app to **generate TikTok-style ad scripts in Moroccan Darija** with **OpenAI
 | `npm run build` | Production build to `dist/` |
 | `npm run start` | Serve production build (set `NODE_ENV=production` after build) |
 | `npm run lint` | Typecheck (`tsc --noEmit`) |
+
+## Install on phone (PWA)
+
+The app registers a **minimal service worker** and ships a **web manifest** so Chrome / Edge / Android can offer **Install** (add to home screen). A popup invites install when the browser supports it. **iOS Safari** has no install button: the popup explains **Share → Add to Home Screen**. Requires **HTTPS** in production (localhost is OK for dev).
 
 ## Security notes for contributors
 
