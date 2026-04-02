@@ -281,6 +281,111 @@ function parseSceneImageKey(key: string): { historyId: string } | null {
   return historyId ? { historyId } : null;
 }
 
+const LF_PRODUCTS_MIRROR = "products_mirror";
+const LF_VIDEOS_MIRROR = "videos_mirror";
+const LF_VIDEOS_OFFLINE_QUEUE = "videos_offline_queue";
+
+type QueuedVideoInsert = {
+  clientId: string;
+  productId: string;
+  name: string;
+  transcription: string;
+  thumbnailBase64?: string;
+  example_kind: "same_product" | "same_effect";
+};
+
+async function readVideoOfflineQueue(): Promise<QueuedVideoInsert[]> {
+  const raw = await localforage.getItem<QueuedVideoInsert[]>(LF_VIDEOS_OFFLINE_QUEUE);
+  return Array.isArray(raw) ? raw : [];
+}
+
+async function writeVideoOfflineQueue(items: QueuedVideoInsert[]) {
+  await localforage.setItem(LF_VIDEOS_OFFLINE_QUEUE, items);
+}
+
+async function appendVideoOfflineQueue(item: QueuedVideoInsert) {
+  const q = await readVideoOfflineQueue();
+  const next = q.filter((x) => x.clientId !== item.clientId);
+  next.push(item);
+  await writeVideoOfflineQueue(next);
+}
+
+async function removeVideoOfflineQueueByClientId(clientId: string) {
+  const q = await readVideoOfflineQueue();
+  await writeVideoOfflineQueue(q.filter((x) => x.clientId !== clientId));
+}
+
+async function rehydrateProductsFromMirror(ownerId: string): Promise<number> {
+  const mirror = await localforage.getItem<Product[]>(LF_PRODUCTS_MIRROR);
+  if (!Array.isArray(mirror) || mirror.length === 0) return 0;
+  let n = 0;
+  for (const p of mirror) {
+    if (!p?.id) continue;
+    const { data: exists } = await supabase
+      .from("products")
+      .select("id")
+      .eq("id", p.id)
+      .maybeSingle();
+    if (exists) continue;
+    const { error } = await supabase.from("products").insert({
+      id: p.id,
+      name: p.name,
+      description: p.description ?? "",
+      script_details: p.scriptDetails ?? "",
+      owner_id: ownerId,
+    });
+    if (!error) n++;
+  }
+  return n;
+}
+
+async function rehydrateVideosFromMirror(ownerId: string): Promise<number> {
+  const mirror = await localforage.getItem<VideoData[]>(LF_VIDEOS_MIRROR);
+  if (!Array.isArray(mirror) || mirror.length === 0) return 0;
+  let n = 0;
+  for (const v of mirror) {
+    if (!v?.id) continue;
+    const { data: exists } = await supabase
+      .from("videos")
+      .select("id")
+      .eq("id", v.id)
+      .maybeSingle();
+    if (exists) continue;
+    const { error } = await supabase.from("videos").insert({
+      id: v.id,
+      product_id: v.productId,
+      name: v.name,
+      transcription: v.transcription,
+      example_kind: v.exampleKind ?? "same_product",
+      thumbnail_base64: v.thumbnailBase64,
+      owner_id: ownerId,
+    });
+    if (!error) n++;
+  }
+  return n;
+}
+
+async function flushVideoOfflineQueue(ownerId: string): Promise<number> {
+  const queue = await readVideoOfflineQueue();
+  if (queue.length === 0) return 0;
+  const remaining: QueuedVideoInsert[] = [];
+  let inserted = 0;
+  for (const q of queue) {
+    const { error } = await supabase.from("videos").insert({
+      product_id: q.productId,
+      name: q.name,
+      transcription: q.transcription,
+      thumbnail_base64: q.thumbnailBase64,
+      example_kind: q.example_kind,
+      owner_id: ownerId,
+    });
+    if (error) remaining.push(q);
+    else inserted++;
+  }
+  await writeVideoOfflineQueue(remaining);
+  return inserted;
+}
+
 const extractAudioBase64 = async (file: File): Promise<string> => {
   const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
   const arrayBuffer = await file.arrayBuffer();
@@ -684,6 +789,9 @@ export default function App() {
     setSavedScripts(scriptsMapped);
     setWebhookHistory(historyMapped);
 
+    void localforage.setItem(LF_PRODUCTS_MIRROR, productsMapped).catch(() => {});
+    void localforage.setItem(LF_VIDEOS_MIRROR, videosMapped).catch(() => {});
+
     setSceneImages((prev) => {
       const updated = { ...prev };
       let hasChanges = false;
@@ -790,9 +898,14 @@ export default function App() {
         else handleDbError(ue, OperationType.UPDATE, `video_history/${historyId}`);
       }
 
+      const productsRestored = await rehydrateProductsFromMirror(user.id);
+      const videosRestored = await rehydrateVideosFromMirror(user.id);
+      const videosFromQueue = await flushVideoOfflineQueue(user.id);
+
       await refreshUserData(user.id);
       alert(
-        `Sauvegard f Supabase OK.\nWebhooks: sauvegard.\nScene images: ${scenesUpdated} / ${historyIds.length} videos.`
+        `Sauvegard f Supabase OK.\nWebhooks: OK.\nScene images: ${scenesUpdated} / ${historyIds.length} history.\n` +
+          `Produits (mirror): +${productsRestored}\nVideos (mirror): +${videosRestored}\nVideos (queue): +${videosFromQueue}`
       );
     } catch (e) {
       console.error(e);
@@ -1114,7 +1227,18 @@ export default function App() {
       };
       if (thumbnailBase64) insertPayload.thumbnail_base64 = thumbnailBase64;
       const { error: vidErr } = await supabase.from("videos").insert(insertPayload);
-      if (vidErr) throw vidErr;
+      if (vidErr) {
+        await appendVideoOfflineQueue({
+          clientId: pendingVideo.id,
+          productId: pendingVideo.productId,
+          name: pendingVideo.file.name,
+          transcription,
+          thumbnailBase64: thumbnailBase64 || undefined,
+          example_kind: pendingVideo.exampleKind,
+        });
+        throw vidErr;
+      }
+      await removeVideoOfflineQueueByClientId(pendingVideo.id);
       await refreshUserData(user!.id);
 
       // Remove from pending videos so UI updates instantly
@@ -3865,8 +3989,9 @@ export default function App() {
                   TEMP — Sauvegard dakchi li local f Supabase
                 </p>
                 <p className="text-[11px] text-amber-800/90">
-                  Kat-pushi webhooks (localStorage + fields l-fou9) w sceneImages (localforage + mémoire) →
-                  user_app_settings w video_history.scene_images. 7yed had l-button mlli tsali migration.
+                  Kat-sauvegard f Supabase: webhooks, scene images, <strong>produits + videos</strong> li f
+                  localforage (mirror mn a7san chargement) w videos li f queue (ila insert fchlat). 7yed
+                  mlli tsali.
                 </p>
                 <button
                   type="button"
