@@ -15,6 +15,7 @@ import {
   Loader2,
   AlertCircle,
   LogIn,
+  KeyRound,
   LogOut,
   Package,
   Video,
@@ -168,6 +169,7 @@ interface Product {
   id: string;
   name: string;
   description: string;
+  scriptDetails?: string;
   ownerId: string;
   createdAt: any;
   modelImageUrl?: string;
@@ -179,6 +181,7 @@ interface VideoData {
   productId: string;
   name: string;
   transcription: string;
+  exampleKind?: 'same_product' | 'same_effect';
   thumbnailBase64?: string;
   createdAt: any;
   ownerId: string;
@@ -189,6 +192,7 @@ interface PendingVideo {
   productId: string;
   file: File;
   url: string;
+  exampleKind: 'same_product' | 'same_effect';
   status: 'pending' | 'transcribing' | 'done' | 'error';
   error?: string;
 }
@@ -227,13 +231,54 @@ enum OperationType {
   WRITE = 'write',
 }
 
+function formatDbErrorForLog(error: unknown): string {
+  if (error == null) return "unknown";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const o = error as {
+      message?: string;
+      code?: string;
+      details?: string;
+      hint?: string;
+    };
+    const parts = [o.message, o.code && `code=${o.code}`, o.details && `details=${o.details}`].filter(
+      Boolean
+    );
+    return parts.join(" — ") || JSON.stringify(error);
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 function handleDbError(error: unknown, operationType: OperationType, path: string | null) {
   const errInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: formatDbErrorForLog(error),
     operationType,
-    path
+    path,
   };
-  console.error("Database error:", JSON.stringify(errInfo));
+  console.error("Database error:", errInfo);
+}
+
+function supabaseErrorMessage(err: { message?: string; code?: string } | null): string {
+  if (!err) return "Unknown error";
+  const code = err.code ? ` (${err.code})` : "";
+  return `${err.message ?? "Request failed"}${code}`;
+}
+
+/** Keys look like `{id}-{sceneIndex}-debut|fin` where id can be a UUID with dashes. */
+function parseSceneImageKey(key: string): { historyId: string } | null {
+  const parts = key.split("-");
+  if (parts.length < 3) return null;
+  const kind = parts.pop();
+  if (kind !== "debut" && kind !== "fin") return null;
+  const idxStr = parts.pop();
+  if (idxStr === undefined || Number.isNaN(parseInt(idxStr, 10))) return null;
+  const historyId = parts.join("-");
+  return historyId ? { historyId } : null;
 }
 
 const extractAudioBase64 = async (file: File): Promise<string> => {
@@ -410,6 +455,7 @@ export default function App() {
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [newProductName, setNewProductName] = useState('');
   const [newProductDesc, setNewProductDesc] = useState('');
+  const [newProductScriptDetails, setNewProductScriptDetails] = useState('');
   
   // Generation State
   const [selectedProductId, setSelectedProductId] = useState<string>('');
@@ -458,6 +504,8 @@ export default function App() {
   const [isSendingWebhook, setIsSendingWebhook] = useState(false);
   const [isSendingImages, setIsSendingImages] = useState(false);
   const [webhookStatus, setWebhookStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  /** TEMP: one-click push localforage sceneImages + webhooks → Supabase */
+  const [isMigratingLocal, setIsMigratingLocal] = useState(false);
 
   // Transcription State
   const [pendingVideos, setPendingVideos] = useState<PendingVideo[]>([]);
@@ -472,7 +520,14 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginConfirmPassword, setLoginConfirmPassword] = useState("");
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authMode, setAuthMode] = useState<"login" | "signup" | "forgot">(
+    "login"
+  );
+  const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
+  const [recoveryPassword, setRecoveryPassword] = useState("");
+  const [recoveryConfirmPassword, setRecoveryConfirmPassword] = useState("");
+  const [recoverySending, setRecoverySending] = useState(false);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [loginSending, setLoginSending] = useState(false);
   const [loginMessage, setLoginMessage] = useState<string | null>(null);
 
@@ -497,6 +552,8 @@ export default function App() {
   }, [pendingVideos]);
 
   const [copied, setCopied] = useState(false);
+  /** Set when Supabase list queries fail — otherwise the UI looks “empty” with no explanation */
+  const [dataSyncError, setDataSyncError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sceneImages, setSceneImages] = useState<Record<string, string>>({});
   const [isUploadingSceneImage, setIsUploadingSceneImage] = useState<Record<string, boolean>>({});
@@ -508,21 +565,51 @@ export default function App() {
       { data: videosRows, error: vErr },
       { data: scriptsRows, error: sErr },
       { data: historyRows, error: hErr },
+      { data: settingsRow, error: stErr },
     ] = await Promise.all([
       supabase.from("products").select("*").eq("owner_id", userId).order("created_at", { ascending: false }),
       supabase.from("videos").select("*").eq("owner_id", userId).order("created_at", { ascending: false }),
       supabase.from("saved_scripts").select("*").eq("owner_id", userId).order("created_at", { ascending: false }),
       supabase.from("video_history").select("*").eq("owner_id", userId).order("created_at", { ascending: false }),
+      supabase
+        .from("user_app_settings")
+        .select("make_webhook_url, images_webhook_url")
+        .eq("owner_id", userId)
+        .maybeSingle(),
     ]);
     if (pErr) handleDbError(pErr, OperationType.LIST, "products");
     if (vErr) handleDbError(vErr, OperationType.LIST, "videos");
     if (sErr) handleDbError(sErr, OperationType.LIST, "saved_scripts");
     if (hErr) handleDbError(hErr, OperationType.LIST, "video_history");
+    if (stErr) handleDbError(stErr, OperationType.LIST, "user_app_settings");
+
+    const syncErrParts: string[] = [];
+    if (pErr) syncErrParts.push(`Products: ${supabaseErrorMessage(pErr)}`);
+    if (vErr) syncErrParts.push(`Videos: ${supabaseErrorMessage(vErr)}`);
+    if (sErr) syncErrParts.push(`Scripts: ${supabaseErrorMessage(sErr)}`);
+    if (hErr) syncErrParts.push(`History: ${supabaseErrorMessage(hErr)}`);
+    if (stErr) syncErrParts.push(`Settings: ${supabaseErrorMessage(stErr)}`);
+    setDataSyncError(syncErrParts.length > 0 ? syncErrParts.join(" · ") : null);
+
+    if (settingsRow && typeof settingsRow === "object") {
+      const sr = settingsRow as Record<string, unknown>;
+      const mk = String(sr.make_webhook_url ?? "");
+      const im = String(sr.images_webhook_url ?? "");
+      setWebhookUrl(mk);
+      setImagesWebhookUrl(im);
+      try {
+        localStorage.setItem("makeWebhookUrl", mk);
+        localStorage.setItem("imagesWebhookUrl", im);
+      } catch {
+        /* ignore quota */
+      }
+    }
 
     const productsMapped: Product[] = (productsRows ?? []).map((row: Record<string, unknown>) => ({
       id: row.id as string,
       name: row.name as string,
       description: (row.description as string) ?? "",
+      scriptDetails: (row.script_details as string | undefined) ?? "",
       ownerId: row.owner_id as string,
       createdAt: createdAtFromIso(row.created_at as string | null),
       modelImageUrl: (row.model_image_url as string | undefined) ?? undefined,
@@ -534,6 +621,9 @@ export default function App() {
       productId: row.product_id as string,
       name: (row.name as string) ?? "",
       transcription: row.transcription as string,
+      exampleKind:
+        (row.example_kind as ('same_product' | 'same_effect' | undefined)) ??
+        'same_product',
       thumbnailBase64: (row.thumbnail_base64 as string | undefined) ?? undefined,
       ownerId: row.owner_id as string,
       createdAt: createdAtFromIso(row.created_at as string | null),
@@ -615,8 +705,102 @@ export default function App() {
     } catch (e) {
       console.error("refreshUserData failed:", e);
       handleDbError(e, OperationType.LIST, "refreshUserData");
+      setDataSyncError(
+        e instanceof Error ? e.message : "Ma9dernach n-chargiw l-data. Chof console."
+      );
     }
   }, []);
+
+  const syncLocalDataToSupabase = useCallback(async () => {
+    if (!user) return;
+    setIsMigratingLocal(true);
+    setError(null);
+    try {
+      const fromLf = await localforage.getItem<Record<string, string>>("sceneImages");
+      const lfObj =
+        fromLf && typeof fromLf === "object" && !Array.isArray(fromLf) ? fromLf : {};
+      const mergedLocal: Record<string, string> = { ...lfObj, ...sceneImages };
+
+      let mkLs = "";
+      let imLs = "";
+      try {
+        mkLs = localStorage.getItem("makeWebhookUrl")?.trim() ?? "";
+        imLs = localStorage.getItem("imagesWebhookUrl")?.trim() ?? "";
+      } catch {
+        /* ignore */
+      }
+      const makeUrl = webhookUrl.trim() || mkLs;
+      const imagesUrl = imagesWebhookUrl.trim() || imLs;
+
+      const { error: upsertErr } = await supabase.from("user_app_settings").upsert(
+        {
+          owner_id: user.id,
+          make_webhook_url: makeUrl,
+          images_webhook_url: imagesUrl,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "owner_id" }
+      );
+      if (upsertErr) throw upsertErr;
+      try {
+        localStorage.setItem("makeWebhookUrl", makeUrl);
+        localStorage.setItem("imagesWebhookUrl", imagesUrl);
+      } catch {
+        /* ignore */
+      }
+      setWebhookUrl(makeUrl);
+      setImagesWebhookUrl(imagesUrl);
+
+      const byHistory: Record<string, Record<string, string>> = {};
+      for (const [key, url] of Object.entries(mergedLocal)) {
+        const parsed = parseSceneImageKey(key);
+        if (!parsed) continue;
+        if (!byHistory[parsed.historyId]) byHistory[parsed.historyId] = {};
+        byHistory[parsed.historyId][key] = url;
+      }
+
+      let scenesUpdated = 0;
+      const historyIds = Object.keys(byHistory);
+      for (const historyId of historyIds) {
+        const patch = byHistory[historyId];
+        const { data: row, error: fe } = await supabase
+          .from("video_history")
+          .select("scene_images")
+          .eq("id", historyId)
+          .eq("owner_id", user.id)
+          .maybeSingle();
+        if (fe) {
+          handleDbError(fe, OperationType.GET, `video_history/${historyId}`);
+          continue;
+        }
+        if (!row) continue;
+        const existing =
+          row.scene_images &&
+          typeof row.scene_images === "object" &&
+          !Array.isArray(row.scene_images)
+            ? (row.scene_images as Record<string, string>)
+            : {};
+        const merged = { ...existing, ...patch };
+        const { error: ue } = await supabase
+          .from("video_history")
+          .update({ scene_images: merged })
+          .eq("id", historyId)
+          .eq("owner_id", user.id);
+        if (!ue) scenesUpdated++;
+        else handleDbError(ue, OperationType.UPDATE, `video_history/${historyId}`);
+      }
+
+      await refreshUserData(user.id);
+      alert(
+        `Sauvegard f Supabase OK.\nWebhooks: sauvegard.\nScene images: ${scenesUpdated} / ${historyIds.length} videos.`
+      );
+    } catch (e) {
+      console.error(e);
+      alert(formatDbErrorForLog(e));
+    } finally {
+      setIsMigratingLocal(false);
+    }
+  }, [user, sceneImages, webhookUrl, imagesWebhookUrl, refreshUserData]);
 
   useEffect(() => {
     let cancelled = false;
@@ -628,6 +812,7 @@ export default function App() {
       if (session?.user) {
         void refreshUserData(session.user.id);
       } else {
+        setDataSyncError(null);
         setProducts([]);
         setVideos([]);
         setSavedScripts([]);
@@ -637,12 +822,16 @@ export default function App() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecoveryMode(true);
+      }
       setUser(session?.user ?? null);
       setIsAuthReady(true);
       if (session?.user) {
         void refreshUserData(session.user.id);
       } else {
+        setDataSyncError(null);
         setProducts([]);
         setVideos([]);
         setSavedScripts([]);
@@ -718,11 +907,83 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    setPasswordRecoveryMode(false);
+    setDataSyncError(null);
     await supabase.auth.signOut();
   };
 
+  const handleSendPasswordReset = async () => {
+    const email = loginEmail.trim();
+    if (!email) {
+      setError("3afak dkhel l-email.");
+      return;
+    }
+    setLoginSending(true);
+    setLoginMessage(null);
+    setError(null);
+    try {
+      const redirectTo =
+        typeof window !== "undefined"
+          ? `${window.location.origin}${window.location.pathname}`
+          : undefined;
+      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(
+        email,
+        { redirectTo }
+      );
+      if (resetErr) throw resetErr;
+      setLoginMessage(
+        "T-fetcheck l-email: dghya l-lien bach t-7awed l-password. Ila ma-l9itch, chof spam."
+      );
+    } catch (err) {
+      console.error(err);
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Ma-tsendnach l-email. Jereb tani.";
+      setError(msg);
+    } finally {
+      setLoginSending(false);
+    }
+  };
+
+  const handleCompletePasswordRecovery = async () => {
+    if (recoveryPassword !== recoveryConfirmPassword) {
+      setError("L-passwords ma-mtchawch.");
+      return;
+    }
+    if (recoveryPassword.length < 6) {
+      setError("L-password khas ykon f a9al 6 d l-7roof.");
+      return;
+    }
+    setRecoverySending(true);
+    setError(null);
+    try {
+      const { error: updErr } = await supabase.auth.updateUser({
+        password: recoveryPassword,
+      });
+      if (updErr) throw updErr;
+      setRecoveryPassword("");
+      setRecoveryConfirmPassword("");
+      setPasswordRecoveryMode(false);
+      setAuthNotice("L-password t-beddel b naja7.");
+    } catch (err) {
+      console.error(err);
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Mouchkil f beddel l-password.";
+      setError(msg);
+    } finally {
+      setRecoverySending(false);
+    }
+  };
+
   // Product Actions
-  const addProduct = async (name: string, description: string) => {
+  const addProduct = async (
+    name: string,
+    description: string,
+    scriptDetails: string
+  ) => {
     if (!user) return;
     try {
       const { data, error } = await supabase
@@ -730,6 +991,7 @@ export default function App() {
         .insert({
           name,
           description,
+          script_details: scriptDetails,
           owner_id: user.id,
         })
         .select("id")
@@ -776,6 +1038,7 @@ export default function App() {
       productId,
       file,
       url: URL.createObjectURL(file),
+      exampleKind: 'same_product',
       status: 'pending'
     }));
     setPendingVideos(prev => [...prev, ...newPending]);
@@ -846,6 +1109,7 @@ export default function App() {
         product_id: pendingVideo.productId,
         name: pendingVideo.file.name,
         transcription,
+        example_kind: pendingVideo.exampleKind,
         owner_id: user!.id,
       };
       if (thumbnailBase64) insertPayload.thumbnail_base64 = thumbnailBase64;
@@ -888,13 +1152,34 @@ export default function App() {
         ? videos 
         : videos.filter(v => v.productId === selectedProductId);
         
-      const context = relevantVideos.map(v => `Example Script:\n${v.transcription}`).join('\n\n---\n\n');
+      const sameProductExamples = relevantVideos.filter(
+        (v) => (v.exampleKind ?? 'same_product') === 'same_product'
+      );
+      const sameEffectExamples = relevantVideos.filter(
+        (v) => (v.exampleKind ?? 'same_product') === 'same_effect'
+      );
+
+      const section = (title: string, list: VideoData[]) =>
+        list.length
+          ? `## ${title}\n\n${list
+              .map((v) => `Example Script:\n${v.transcription}`)
+              .join('\n\n---\n\n')}`
+          : '';
+
+      const contextParts = [
+        section('Style Examples (Same Product)', sameProductExamples),
+        section('Style Examples (Same Effect / Same Result)', sameEffectExamples),
+      ].filter(Boolean);
+
+      const context = contextParts.join('\n\n\n');
       
       let productInfo = "All Products";
       if (selectedProductId !== 'all') {
         const product = products.find(p => p.id === selectedProductId);
         if (product) {
-          productInfo = `Product: ${product.name}\nDescription: ${product.description}`;
+          const details = (product.scriptDetails ?? "").trim();
+          const fallbackDetails = details || (product.description ?? "").trim();
+          productInfo = `Product: ${product.name}\nDescription: ${product.description}\nScript Details (extra context): ${fallbackDetails || "N/A"}`;
         }
       }
 
@@ -922,6 +1207,9 @@ export default function App() {
         Write a high-converting script in Moroccan Darija.
         
         ${productInfo}
+
+        Style Examples (use to match tone, rhythm, and structure — do NOT copy text verbatim):
+        ${context || "No examples available."}
         
         Target Duration: ${duration} seconds.
         ${wordCountHint}
@@ -1259,6 +1547,12 @@ export default function App() {
     }
   };
 
+  const showMissingImagesDialog = (items: string[]): boolean => {
+    if (items.length === 0) return false;
+    setMissingImagesDialog(items);
+    return true;
+  };
+
   const sendImagesToWebhook = async () => {
     if (!imagesWebhookUrl || !webhookResponseData || !webhookResponseData.scenes) return;
 
@@ -1276,8 +1570,7 @@ export default function App() {
       }
     });
 
-    if (missingImages.length > 0) {
-      setMissingImagesDialog(missingImages);
+    if (showMissingImagesDialog(missingImages)) {
       return;
     }
 
@@ -1348,6 +1641,12 @@ export default function App() {
   const sendToWebhook = async () => {
     if (!webhookUrl || !generatedScript || generatedScript === "Smah lina, ma9dernach n-generiw script.") return;
     if (!user) return;
+
+    const missingImages: string[] = [];
+    if (useModelRef && !modelImageUrl) missingImages.push("Tswira d l-Model");
+    if (useProductRef && !productImageUrl) missingImages.push("Tswira d l-Produit");
+    if (useBackgroundRef && !backgroundImageUrl) missingImages.push("Tswira d l-Background");
+    if (showMissingImagesDialog(missingImages)) return;
 
     setIsSendingWebhook(true);
     setWebhookStatus("idle");
@@ -1641,6 +1940,15 @@ export default function App() {
     if (!user) return;
     const st = scriptToSend;
 
+    const missingImages: string[] = [];
+    if (savedScriptModelImageFile && !savedScriptModelImageUrl)
+      missingImages.push("Tswira d l-Model");
+    if (savedScriptProductImageFile && !savedScriptProductImageUrl)
+      missingImages.push("Tswira d l-Produit");
+    if (savedScriptBackgroundImageFile && !savedScriptBackgroundImageUrl)
+      missingImages.push("Tswira d l-Background");
+    if (showMissingImagesDialog(missingImages)) return;
+
     setIsSendingWebhook(true);
     setWebhookStatus("idle");
     setGeneratedVideoUrl(null);
@@ -1795,6 +2103,63 @@ export default function App() {
     );
   }
 
+  if (passwordRecoveryMode && user) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+        <div className="bg-white p-8 rounded-3xl shadow-xl max-w-md w-full text-center space-y-6">
+          <div className="bg-orange-500 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-orange-200">
+            <KeyRound className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight">7awed l-password</h1>
+          <p className="text-gray-500 text-sm">
+            Dkhel password jdid l-compte{" "}
+            <span className="font-medium text-gray-700">{user.email}</span>
+          </p>
+          <div className="space-y-3 text-left">
+            <label className="block text-sm font-medium text-gray-700">
+              Password jdid
+            </label>
+            <input
+              type="password"
+              value={recoveryPassword}
+              onChange={(e) => setRecoveryPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+              autoComplete="new-password"
+            />
+            <label className="block text-sm font-medium text-gray-700">
+              3awd l-password
+            </label>
+            <input
+              type="password"
+              value={recoveryConfirmPassword}
+              onChange={(e) => setRecoveryConfirmPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+              autoComplete="new-password"
+            />
+          </div>
+          {error && (
+            <p className="text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2">{error}</p>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleCompletePasswordRecovery()}
+            disabled={recoverySending}
+            className="w-full py-4 bg-black text-white rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-gray-800 transition-all disabled:opacity-60"
+          >
+            {recoverySending ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <KeyRound className="w-5 h-5" />
+            )}
+            {recoverySending ? "Sandani..." : "7awed l-password"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
@@ -1804,36 +2169,50 @@ export default function App() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight">Video Flow</h1>
           <p className="text-gray-500">Kteb scripts dial TikTok ads b-Darija derya o b-style dialk.</p>
-          <div className="flex rounded-xl bg-gray-100 p-1 text-sm font-medium">
+          {authMode !== "forgot" ? (
+            <div className="flex rounded-xl bg-gray-100 p-1 text-sm font-medium">
+              <button
+                type="button"
+                className={cn(
+                  "flex-1 py-2 rounded-lg transition-colors",
+                  authMode === "login" ? "bg-white shadow text-gray-900" : "text-gray-500"
+                )}
+                onClick={() => {
+                  setAuthMode("login");
+                  setError(null);
+                  setLoginMessage(null);
+                }}
+              >
+                Dkhol
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "flex-1 py-2 rounded-lg transition-colors",
+                  authMode === "signup" ? "bg-white shadow text-gray-900" : "text-gray-500"
+                )}
+                onClick={() => {
+                  setAuthMode("signup");
+                  setError(null);
+                  setLoginMessage(null);
+                }}
+              >
+                Compte jdid
+              </button>
+            </div>
+          ) : (
             <button
               type="button"
-              className={cn(
-                "flex-1 py-2 rounded-lg transition-colors",
-                authMode === "login" ? "bg-white shadow text-gray-900" : "text-gray-500"
-              )}
+              className="text-sm text-orange-600 font-medium hover:underline"
               onClick={() => {
                 setAuthMode("login");
                 setError(null);
                 setLoginMessage(null);
               }}
             >
-              Dkhol
+              ← Rje3 l-login
             </button>
-            <button
-              type="button"
-              className={cn(
-                "flex-1 py-2 rounded-lg transition-colors",
-                authMode === "signup" ? "bg-white shadow text-gray-900" : "text-gray-500"
-              )}
-              onClick={() => {
-                setAuthMode("signup");
-                setError(null);
-                setLoginMessage(null);
-              }}
-            >
-              Compte jdid
-            </button>
-          </div>
+          )}
           <div className="space-y-3 text-left">
             <label className="block text-sm font-medium text-gray-700">Email</label>
             <input
@@ -1844,15 +2223,19 @@ export default function App() {
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
               autoComplete="email"
             />
-            <label className="block text-sm font-medium text-gray-700">Password</label>
-            <input
-              type="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
-              autoComplete={authMode === "signup" ? "new-password" : "current-password"}
-            />
+            {authMode !== "forgot" && (
+              <>
+                <label className="block text-sm font-medium text-gray-700">Password</label>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-transparent outline-none"
+                  autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                />
+              </>
+            )}
             {authMode === "signup" && (
               <>
                 <label className="block text-sm font-medium text-gray-700">3awd l-password</label>
@@ -1866,6 +2249,19 @@ export default function App() {
                 />
               </>
             )}
+            {authMode === "login" && (
+              <button
+                type="button"
+                className="text-sm text-orange-600 hover:underline"
+                onClick={() => {
+                  setAuthMode("forgot");
+                  setError(null);
+                  setLoginMessage(null);
+                }}
+              >
+                Nsit l-password?
+              </button>
+            )}
           </div>
           {loginMessage && (
             <p className="text-sm text-green-600 bg-green-50 rounded-xl px-3 py-2">{loginMessage}</p>
@@ -1875,12 +2271,18 @@ export default function App() {
           )}
           <button
             type="button"
-            onClick={() => void handlePasswordAuth()}
+            onClick={() =>
+              void (authMode === "forgot"
+                ? handleSendPasswordReset()
+                : handlePasswordAuth())
+            }
             disabled={loginSending}
             className="w-full py-4 bg-black text-white rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-gray-800 transition-all disabled:opacity-60"
           >
             {loginSending ? (
               <Loader2 className="w-5 h-5 animate-spin" />
+            ) : authMode === "forgot" ? (
+              <KeyRound className="w-5 h-5" />
             ) : (
               <LogIn className="w-5 h-5" />
             )}
@@ -1888,7 +2290,9 @@ export default function App() {
               ? "Sandani..."
               : authMode === "signup"
                 ? "Sijel"
-                : "Dkhol"}
+                : authMode === "forgot"
+                  ? "Sifet l-lien"
+                  : "Dkhol"}
           </button>
         </div>
       </div>
@@ -1897,6 +2301,38 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-20">
+      {authNotice && (
+        <div className="bg-green-50 border-b border-green-100 px-4 py-2.5 text-center text-sm text-green-800 flex flex-wrap items-center justify-center gap-2">
+          <span>{authNotice}</span>
+          <button
+            type="button"
+            onClick={() => setAuthNotice(null)}
+            className="font-medium underline text-green-900"
+          >
+            Fermer
+          </button>
+        </div>
+      )}
+      {dataSyncError && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 text-sm text-amber-950">
+          <div className="max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-semibold">Ma-tchargawch l-data mn Supabase</p>
+              <p className="text-amber-900/90 break-words mt-1">{dataSyncError}</p>
+              <p className="text-xs text-amber-800/80 mt-2">
+                Ghaleb: migrations ma-texecutawch, RLS, wla <code className="bg-amber-100 px-1 rounded">VITE_SUPABASE_*</code> ma-homach dial nafs l-project li fih l-data. Chof browser console.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => user && void refreshUserData(user.id)}
+              className="shrink-0 px-4 py-2 bg-amber-600 text-white rounded-xl font-medium hover:bg-amber-700"
+            >
+              Jereb tani
+            </button>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-3 sm:py-0 sm:h-auto sm:min-h-16 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2027,6 +2463,30 @@ export default function App() {
                             <video src={v.url} className="w-full h-full object-cover" controls />
                           </div>
 
+                          <div className="space-y-1">
+                            <label className="block text-[11px] font-semibold text-gray-600">
+                              Had l-video kaymthel:
+                            </label>
+                            <select
+                              value={v.exampleKind}
+                              onChange={(e) => {
+                                const next = e.target.value as
+                                  | 'same_product'
+                                  | 'same_effect';
+                                setPendingVideos((prev) =>
+                                  prev.map((pv) =>
+                                    pv.id === v.id ? { ...pv, exampleKind: next } : pv
+                                  )
+                                );
+                              }}
+                              disabled={v.status === 'transcribing'}
+                              className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none disabled:opacity-60"
+                            >
+                              <option value="same_product">Nafs l-produit</option>
+                              <option value="same_effect">Produit akhor (nafs l-fa3alia)</option>
+                            </select>
+                          </div>
+
                           {v.error && <p className="text-xs text-red-500">{v.error}</p>}
 
                           <button 
@@ -2054,6 +2514,18 @@ export default function App() {
                               <FileVideo className="w-4 h-4" />
                               <span className="text-xs font-medium truncate max-w-[120px]">{v.name || 'Video'}</span>
                             </div>
+                            <span
+                              className={cn(
+                                "text-[10px] px-2 py-0.5 rounded-full border font-semibold",
+                                (v.exampleKind ?? 'same_product') === 'same_effect'
+                                  ? "bg-purple-50 text-purple-700 border-purple-200"
+                                  : "bg-green-50 text-green-700 border-green-200"
+                              )}
+                            >
+                              {(v.exampleKind ?? 'same_product') === 'same_effect'
+                                ? 'Same effect'
+                                : 'Same product'}
+                            </span>
                             <button onClick={() => deleteVideo(v.id)} className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -2092,9 +2564,25 @@ export default function App() {
                 </div>
               ))}
               {products.length === 0 && (
-                <div className="py-20 text-center space-y-4 opacity-40">
-                  <Package className="w-12 h-12 mx-auto" />
-                  <p>Mazal ma ztti hta produit. Click 3la "Zid Produit" l-fou9.</p>
+                <div
+                  className={cn(
+                    "py-20 text-center space-y-4",
+                    dataSyncError ? "opacity-100" : "opacity-40"
+                  )}
+                >
+                  <Package className="w-12 h-12 mx-auto text-gray-300" />
+                  {dataSyncError ? (
+                    <>
+                      <p className="text-gray-800 font-medium">
+                        Ma-l9inach produits — l-erreur dial Supabase f l-banner l-fou9.
+                      </p>
+                      <p className="text-sm text-gray-500 max-w-md mx-auto">
+                        Ila ma-kayn hta erreur f l-banner, y3ni l-compte hada ma fih hta produit: zid wa7ed b &quot;Zid Produit&quot;.
+                      </p>
+                    </>
+                  ) : (
+                    <p>Mazal ma ztti hta produit. Click 3la &quot;Zid Produit&quot; l-fou9.</p>
+                  )}
                 </div>
               )}
             </div>
@@ -2195,7 +2683,12 @@ export default function App() {
                       {webhookUrl && (
                         <button 
                           onClick={sendToWebhook}
-                          disabled={isSendingWebhook || isUploadingModel || isUploadingProduct}
+                          disabled={
+                            isSendingWebhook ||
+                            isUploadingModel ||
+                            isUploadingProduct ||
+                            isUploadingBackground
+                          }
                           className="p-2 hover:bg-purple-50 rounded-lg transition-colors flex items-center gap-2 text-sm text-purple-600 font-medium disabled:opacity-50"
                         >
                           {isSendingWebhook ? (
@@ -3139,6 +3632,21 @@ export default function App() {
                   placeholder="Wsef l-produit dialk..."
                 />
               </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Script details (khass l-AI y3rf)
+                </label>
+                <textarea
+                  className="w-full px-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none resize-none"
+                  rows={4}
+                  value={newProductScriptDetails}
+                  onChange={(e) => setNewProductScriptDetails(e.target.value)}
+                  placeholder="مثال: الثمن، العرض، الفئة المستهدفة، المشكل اللي كيحلّ، USP، الضمان، ممنوع نقولو كذا، CTA..."
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  هادشي كيدخل تلقائياً فـ Generi Script ملي كتختار هاد المنتج.
+                </p>
+              </div>
             </div>
             <div className="flex gap-3 justify-end mt-6">
               <button 
@@ -3146,6 +3654,7 @@ export default function App() {
                   setIsAddProductModalOpen(false);
                   setNewProductName('');
                   setNewProductDesc('');
+                  setNewProductScriptDetails('');
                 }}
                 className="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded-xl font-medium transition-colors"
               >
@@ -3154,10 +3663,15 @@ export default function App() {
               <button 
                 onClick={() => {
                   if (newProductName.trim()) {
-                    addProduct(newProductName.trim(), newProductDesc.trim());
+                    addProduct(
+                      newProductName.trim(),
+                      newProductDesc.trim(),
+                      newProductScriptDetails.trim()
+                    );
                     setIsAddProductModalOpen(false);
                     setNewProductName('');
                     setNewProductDesc('');
+                    setNewProductScriptDetails('');
                   }
                 }}
                 disabled={!newProductName.trim()}
@@ -3288,7 +3802,12 @@ export default function App() {
               </button>
               <button
                 onClick={sendSavedScriptToWebhook}
-                disabled={!webhookUrl || isUploadingSavedModel || isUploadingSavedProduct}
+                disabled={
+                  !webhookUrl ||
+                  isUploadingSavedModel ||
+                  isUploadingSavedProduct ||
+                  isUploadingSavedBackground
+                }
                 className="flex-1 px-4 py-2 bg-orange-500 text-white rounded-xl font-medium hover:bg-orange-600 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 <Send className="w-4 h-4" />
@@ -3340,6 +3859,29 @@ export default function App() {
                   Had l-URL ghadi n-sifto lih tsawer dyal kol scene m3a script (POST request).
                 </p>
               </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 space-y-2">
+                <p className="text-xs font-semibold text-amber-900">
+                  TEMP — Sauvegard dakchi li local f Supabase
+                </p>
+                <p className="text-[11px] text-amber-800/90">
+                  Kat-pushi webhooks (localStorage + fields l-fou9) w sceneImages (localforage + mémoire) →
+                  user_app_settings w video_history.scene_images. 7yed had l-button mlli tsali migration.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void syncLocalDataToSupabase()}
+                  disabled={isMigratingLocal || !user}
+                  className="w-full py-2.5 text-sm font-semibold rounded-xl bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isMigratingLocal ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Upload className="w-4 h-4" />
+                  )}
+                  {isMigratingLocal ? "Kan-sauvegardiw..." : "Sync local → Supabase"}
+                </button>
+              </div>
             </div>
             <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
               <button 
@@ -3349,11 +3891,40 @@ export default function App() {
                 Lghi
               </button>
               <button 
+                type="button"
                 onClick={() => {
-                  localStorage.setItem('makeWebhookUrl', webhookUrl.trim());
-                  localStorage.setItem('imagesWebhookUrl', imagesWebhookUrl.trim());
-                  setShowSettings(false);
-                  alert('Settings m-sauvegarder b-naja7!');
+                  void (async () => {
+                    const mk = webhookUrl.trim();
+                    const im = imagesWebhookUrl.trim();
+                    try {
+                      localStorage.setItem("makeWebhookUrl", mk);
+                      localStorage.setItem("imagesWebhookUrl", im);
+                    } catch {
+                      /* ignore */
+                    }
+                    if (!user) {
+                      setShowSettings(false);
+                      alert(
+                        "Settings m-sauvegarder (localStorage). Dkhol b-compte bach t-sauvegard f Supabase."
+                      );
+                      return;
+                    }
+                    const { error } = await supabase.from("user_app_settings").upsert(
+                      {
+                        owner_id: user.id,
+                        make_webhook_url: mk,
+                        images_webhook_url: im,
+                        updated_at: new Date().toISOString(),
+                      },
+                      { onConflict: "owner_id" }
+                    );
+                    if (error) {
+                      alert(formatDbErrorForLog(error));
+                      return;
+                    }
+                    setShowSettings(false);
+                    alert("Settings m-sauvegarder f Supabase + local.");
+                  })();
                 }}
                 className="px-4 py-2 bg-orange-500 text-white rounded-xl font-medium hover:bg-orange-600 transition-colors"
               >

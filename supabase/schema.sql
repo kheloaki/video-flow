@@ -7,10 +7,15 @@ create table if not exists public.products (
   owner_id uuid not null references auth.users (id) on delete cascade,
   name text not null,
   description text default '',
+  script_details text default '',
   model_image_url text,
   product_image_url text,
   created_at timestamptz not null default now()
 );
+
+-- If table already existed before this column was added
+alter table public.products
+  add column if not exists script_details text default '';
 
 alter table public.products enable row level security;
 
@@ -40,9 +45,14 @@ create table if not exists public.videos (
   product_id text not null,
   name text default '',
   transcription text not null,
+  example_kind text not null default 'same_product',
   thumbnail_base64 text,
   created_at timestamptz not null default now()
 );
+
+-- If table already existed before this column was added
+alter table public.videos
+  add column if not exists example_kind text not null default 'same_product';
 
 alter table public.videos enable row level security;
 
@@ -132,3 +142,26 @@ create policy "video_history_delete_own" on public.video_history
   for delete using (owner_id = auth.uid());
 
 create index if not exists video_history_owner_created_idx on public.video_history (owner_id, created_at desc);
+
+-- ========== user_app_settings (webhooks — replaces localStorage-only for signed-in users) ==========
+create table if not exists public.user_app_settings (
+  owner_id uuid primary key references auth.users (id) on delete cascade,
+  make_webhook_url text not null default '',
+  images_webhook_url text not null default '',
+  updated_at timestamptz not null default now()
+);
+
+alter table public.user_app_settings enable row level security;
+
+drop policy if exists "user_app_settings_select_own" on public.user_app_settings;
+drop policy if exists "user_app_settings_insert_own" on public.user_app_settings;
+drop policy if exists "user_app_settings_update_own" on public.user_app_settings;
+
+create policy "user_app_settings_select_own" on public.user_app_settings
+  for select using (owner_id = auth.uid());
+
+create policy "user_app_settings_insert_own" on public.user_app_settings
+  for insert with check (owner_id = auth.uid());
+
+create policy "user_app_settings_update_own" on public.user_app_settings
+  for update using (owner_id = auth.uid()) with check (owner_id = auth.uid());
