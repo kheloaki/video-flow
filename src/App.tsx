@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -269,121 +269,421 @@ function supabaseErrorMessage(err: { message?: string; code?: string } | null): 
   return `${err.message ?? "Request failed"}${code}`;
 }
 
-/** Keys look like `{id}-{sceneIndex}-debut|fin` where id can be a UUID with dashes. */
-function parseSceneImageKey(key: string): { historyId: string } | null {
-  const parts = key.split("-");
-  if (parts.length < 3) return null;
-  const kind = parts.pop();
-  if (kind !== "debut" && kind !== "fin") return null;
-  const idxStr = parts.pop();
-  if (idxStr === undefined || Number.isNaN(parseInt(idxStr, 10))) return null;
-  const historyId = parts.join("-");
-  return historyId ? { historyId } : null;
+type ModelGender = "any" | "woman" | "man";
+type ModelAge = "any" | "young" | "aged";
+type VoiceScriptLanguage = "darija" | "darija_french" | "french" | "msa";
+
+function voiceLanguagePromptBlock(lang: VoiceScriptLanguage): string {
+  switch (lang) {
+    case "darija":
+      return `VOICE LANGUAGE: Moroccan Darija (الدارجة المغربية) for ALL spoken lines — same colloquial level from the first word to the last.
+
+PRONUNCIATION — CRITICAL (Darija): Make every line easy to say out loud on camera or with TTS.
+- The “Style Examples” in the prompt may be transcriptions in MSA, mixed Arabic, or older ad copy — treat them ONLY as rhythm, energy, and structure hints. NEVER copy their formal Arabic phrasing or vocabulary into your output; translate the same ideas into real spoken Darija (كي…، غادي، دابا، شنو، واش، بزاف، مزيان، شري، دير، شوف، راه… style), not classroom Arabic.
+- Do NOT start with formal Arabic “ad copy” openings (e.g. heavy MSA like “عندك آلام في الظهر” / “هل تعاني من…”) and then switch to Darija — the whole script must sound like one Moroccan creator talking Darija throughout.
+- Avoid heavy Classical Arabic (فصحى), rare literary words, case endings, and stiff MSA — prefer everyday Moroccan words people actually say in speech.
+- Avoid tongue-twisters, cramped phrasing, and awkward consonant clusters; use short, clear sentences.
+- Prefer simple, common Darija over fancy or “elevated” synonyms that are hard to pronounce.
+- If you write in Arabic letters, use natural Darija orthography as on Moroccan social (e.g. كيعطي، غادي، ما تبقاش) — not MSA newsreader phrasing with the same ideas re-written in فصحى.
+- Brand/product names: keep official spelling if required, but keep surrounding wording plain and natural to say.`;
+    case "darija_french":
+      return `VOICE LANGUAGE: Natural Moroccan code-switching — Darija with French where people really use it in TikTok ads and daily talk.
+Keep both languages easy to pronounce: no ornate or rare French, no heavy فصحى in Darija stretches.
+- Style examples may be in MSA or formal Arabic — do NOT mirror that register in the Darija parts; keep Darija colloquial even when you borrow hook structure from examples.
+- Do not mix a formal Arabic intro (fully vocalized or MSA-style) with colloquial body — keep one consistent spoken register.
+- If Arabic script appears, it must be Darija-style wording, not formal marketing Arabic.`;
+    case "french":
+      return `VOICE LANGUAGE: French for all spoken lines — natural, clear spoken French suited to Moroccan social/TikTok ads (avoid stiff admin-style French).`;
+    case "msa":
+      return `VOICE LANGUAGE: Modern Standard Arabic (العربية الفصحى) for all spoken lines — clear and sayable for short video (avoid archaic or overly poetic wording).`;
+    default:
+      return voiceLanguagePromptBlock("darija");
+  }
 }
 
-const LF_PRODUCTS_MIRROR = "products_mirror";
-const LF_VIDEOS_MIRROR = "videos_mirror";
-const LF_VIDEOS_OFFLINE_QUEUE = "videos_offline_queue";
+/** Full harakat mainly for MSA voice mode; Darija modes avoid textbook vocalization. */
+const TASHKEEL_INSTRUCTIONS_MSA = `TASHKEEL / HARAKAT (تشكيل): For any word in Arabic script that is uncommon, long, easy to misread, or hard to pronounce, add full diacritics (فتحة، كسرة، ضمة، سكون، تنوين، شدة) on that word. Very short everyday words may stay unvocalized if obvious.`;
 
-type QueuedVideoInsert = {
-  clientId: string;
-  productId: string;
-  name: string;
-  transcription: string;
-  thumbnailBase64?: string;
-  example_kind: "same_product" | "same_effect";
+const ORTHOGRAPHY_DARIJA_ARABIC_SCRIPT = `SCRIPT LOOK (Darija in Arabic letters): Write like Moroccan TikTok/social voiceovers — normal Arabic letters, same style start to finish.
+- Do NOT add harakat to every word or whole sentences (no “schoolbook” or Quranic-style full vocalization).
+- Default: no diacritics. Only if one isolated word is truly ambiguous for reading or TTS, you may mark that word lightly — never the full line.
+- The text must read as spoken Darija, not formal Arabic lines dressed in diacritics.`;
+
+const ORTHOGRAPHY_DARIJA_FRENCH = `SCRIPT LOOK (Darija + French): Latin chat spelling is fine for Darija/French. For at most one genuinely hard Darija term you may add once Arabic in parentheses with light tashkeel, e.g. daba (دابا) — do not paste long fully vocalized Arabic paragraphs.
+If you use Arabic script for Darija lines, same rule as Darija-only: no full-sentence harakat; colloquial Darija wording only.`;
+
+const ORTHOGRAPHY_FRENCH_ONLY = `SCRIPT LOOK: Write the voiceover in Latin script (French). No Arabic diacritics.`;
+
+function tashkeelAndOrthographyBlock(lang: VoiceScriptLanguage): string {
+  switch (lang) {
+    case "darija":
+      return ORTHOGRAPHY_DARIJA_ARABIC_SCRIPT;
+    case "darija_french":
+      return ORTHOGRAPHY_DARIJA_FRENCH;
+    case "french":
+      return ORTHOGRAPHY_FRENCH_ONLY;
+    case "msa":
+      return TASHKEEL_INSTRUCTIONS_MSA;
+    default:
+      return ORTHOGRAPHY_DARIJA_ARABIC_SCRIPT;
+  }
+}
+
+function formatVeoAvoidWordsBlock(raw: string): string {
+  const parts = raw
+    .split(/[\n,،؛;|]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return "";
+  return `GOOGLE VEO 3 / VIDEO — FORBIDDEN WORDS (CRITICAL): Never use these terms (or obvious close variants / unsafe wording) in dialogue, on-screen text, visual descriptions, or CTAs. Use safe Moroccan alternatives:
+${parts.map((p) => `- ${p}`).join("\n")}`;
+}
+
+/** Fixed pacing: each scene is this many seconds. */
+const SECONDS_PER_SCENE = 8;
+
+function parseSceneCountForVideo(sceneCount: string): number {
+  const n = parseInt(sceneCount, 10);
+  return Number.isFinite(n) && n >= 2 && n <= 10 ? n : 5;
+}
+
+function totalVideoSecondsFromScenes(sceneCount: string): number {
+  return parseSceneCountForVideo(sceneCount) * SECONDS_PER_SCENE;
+}
+
+function wordCountHintFromTotalSeconds(totalSec: number): string {
+  if (totalSec <= 16)
+    return "CRITICAL: The script MUST be VERY SHORT (max 30-40 words total). Keep it extremely punchy and fast. DO NOT write a long script.";
+  if (totalSec <= 24)
+    return "CRITICAL: The script MUST be SHORT (around 45-55 words total). Fast-paced, straight to the point.";
+  if (totalSec <= 32)
+    return "CRITICAL: The script MUST be SHORT (around 55-65 words total). Fast-paced, straight to the point.";
+  if (totalSec <= 40)
+    return "CRITICAL: The script MUST be SHORT-MEDIUM (around 70-85 words total). Good pacing.";
+  if (totalSec <= 48)
+    return "CRITICAL: The script MUST be MEDIUM length (around 100-120 words total).";
+  if (totalSec <= 64)
+    return "CRITICAL: The script MUST be MEDIUM-LONG length (around 130-145 words total).";
+  return "CRITICAL: The script MUST be LONG (150+ words total). Detailed storytelling.";
+}
+
+const USED_VISUAL_PROMPTS_LS_KEY = "darijaScriptAi.usedVisualPrompts";
+const USED_VISUAL_PROMPTS_MAX = 50;
+
+type UsedVisualPromptsStore = {
+  models: string[];
+  backgrounds: string[];
 };
 
-async function readVideoOfflineQueue(): Promise<QueuedVideoInsert[]> {
-  const raw = await localforage.getItem<QueuedVideoInsert[]>(LF_VIDEOS_OFFLINE_QUEUE);
-  return Array.isArray(raw) ? raw : [];
-}
-
-async function writeVideoOfflineQueue(items: QueuedVideoInsert[]) {
-  await localforage.setItem(LF_VIDEOS_OFFLINE_QUEUE, items);
-}
-
-async function appendVideoOfflineQueue(item: QueuedVideoInsert) {
-  const q = await readVideoOfflineQueue();
-  const next = q.filter((x) => x.clientId !== item.clientId);
-  next.push(item);
-  await writeVideoOfflineQueue(next);
-}
-
-async function removeVideoOfflineQueueByClientId(clientId: string) {
-  const q = await readVideoOfflineQueue();
-  await writeVideoOfflineQueue(q.filter((x) => x.clientId !== clientId));
-}
-
-async function rehydrateProductsFromMirror(ownerId: string): Promise<number> {
-  const mirror = await localforage.getItem<Product[]>(LF_PRODUCTS_MIRROR);
-  if (!Array.isArray(mirror) || mirror.length === 0) return 0;
-  let n = 0;
-  for (const p of mirror) {
-    if (!p?.id) continue;
-    const { data: exists } = await supabase
-      .from("products")
-      .select("id")
-      .eq("id", p.id)
-      .maybeSingle();
-    if (exists) continue;
-    const { error } = await supabase.from("products").insert({
-      id: p.id,
-      name: p.name,
-      description: p.description ?? "",
-      script_details: p.scriptDetails ?? "",
-      owner_id: ownerId,
-    });
-    if (!error) n++;
+function loadUsedVisualPrompts(): UsedVisualPromptsStore {
+  if (typeof window === "undefined") return { models: [], backgrounds: [] };
+  try {
+    const raw = localStorage.getItem(USED_VISUAL_PROMPTS_LS_KEY);
+    if (!raw) return { models: [], backgrounds: [] };
+    const j = JSON.parse(raw) as unknown;
+    if (!j || typeof j !== "object") return { models: [], backgrounds: [] };
+    const o = j as Record<string, unknown>;
+    const models = Array.isArray(o.models)
+      ? o.models.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    const backgrounds = Array.isArray(o.backgrounds)
+      ? o.backgrounds.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    return { models, backgrounds };
+  } catch {
+    return { models: [], backgrounds: [] };
   }
-  return n;
 }
 
-async function rehydrateVideosFromMirror(ownerId: string): Promise<number> {
-  const mirror = await localforage.getItem<VideoData[]>(LF_VIDEOS_MIRROR);
-  if (!Array.isArray(mirror) || mirror.length === 0) return 0;
-  let n = 0;
-  for (const v of mirror) {
-    if (!v?.id) continue;
-    const { data: exists } = await supabase
-      .from("videos")
-      .select("id")
-      .eq("id", v.id)
-      .maybeSingle();
-    if (exists) continue;
-    const { error } = await supabase.from("videos").insert({
-      id: v.id,
-      product_id: v.productId,
-      name: v.name,
-      transcription: v.transcription,
-      example_kind: v.exampleKind ?? "same_product",
-      thumbnail_base64: v.thumbnailBase64,
-      owner_id: ownerId,
-    });
-    if (!error) n++;
+function saveUsedVisualPrompts(store: UsedVisualPromptsStore) {
+  try {
+    localStorage.setItem(USED_VISUAL_PROMPTS_LS_KEY, JSON.stringify(store));
+  } catch {
+    /* ignore */
   }
-  return n;
 }
 
-async function flushVideoOfflineQueue(ownerId: string): Promise<number> {
-  const queue = await readVideoOfflineQueue();
-  if (queue.length === 0) return 0;
-  const remaining: QueuedVideoInsert[] = [];
-  let inserted = 0;
-  for (const q of queue) {
-    const { error } = await supabase.from("videos").insert({
-      product_id: q.productId,
-      name: q.name,
-      transcription: q.transcription,
-      thumbnail_base64: q.thumbnailBase64,
-      example_kind: q.example_kind,
-      owner_id: ownerId,
-    });
-    if (error) remaining.push(q);
-    else inserted++;
+function appendUsedVisualPrompts(modelPrompt: string, backgroundPrompt: string) {
+  const m = modelPrompt.trim();
+  const b = backgroundPrompt.trim();
+  if (!m || !b) return;
+  const cur = loadUsedVisualPrompts();
+  saveUsedVisualPrompts({
+    models: [...cur.models, m].slice(-USED_VISUAL_PROMPTS_MAX),
+    backgrounds: [...cur.backgrounds, b].slice(-USED_VISUAL_PROMPTS_MAX),
+  });
+}
+
+function formatUsedVisualPromptsForAi(): string {
+  const { models, backgrounds } = loadUsedVisualPrompts();
+  if (models.length === 0 && backgrounds.length === 0) {
+    return "PREVIOUS PROMPTS IN THIS BROWSER: none yet (first generation — no reuse constraints).";
   }
-  await writeVideoOfflineQueue(remaining);
-  return inserted;
+  const clip = (s: string) => (s.length > 380 ? `${s.slice(0, 377)}…` : s);
+  const modelBlock = models
+    .map((s, i) => `${i + 1}. ${clip(s)}`)
+    .join("\n");
+  const bgBlock = backgrounds.map((s, i) => `${i + 1}. ${clip(s)}`).join("\n");
+  return `PREVIOUSLY USED MODEL PROMPT (same browser, Step 3) — you MUST NOT reproduce the same on-camera recipe: same pose family, same wardrobe vibe, same lens/lighting combo, or same facial micro-expression pattern. Invent a clearly DIFFERENT talent presentation:
+${modelBlock || "—"}
+
+PREVIOUSLY USED BACKGROUND PROMPT (same browser) — you MUST NOT reproduce the same environment: same room type, same palette, same prop arrangement, same time-of-day mood. Invent a clearly DIFFERENT set:
+${bgBlock || "—"}`;
+}
+
+/** Rebuild locked markdown for Step 4 / webhooks from edited model + background blocks */
+function buildStep3VisualMarkdown(modelBlock: string, background: string): string {
+  return `## Model\n\n${modelBlock.trim()}\n\n## Background\n\n${background.trim()}`.trim();
+}
+
+/**
+ * Expect ## Model (one block: single prompt for the whole sheet) then ## Background.
+ */
+const DEFAULT_STEP3_BACKGROUND_PROMPT =
+  "ONE calm real interior for ALL scenes (same simple room every time — not a white studio): sparse furnishings, few visible objects, not cluttered; believable wall and surfaces (e.g. bathroom with mirror and tile, or quiet bedroom corner); soft natural daylight feel, photorealistic — absolutely no people, no hands, no equipment; not a plain empty white void.";
+
+function parseStep3ModelBackground(full: string): { model: string; background: string } | null {
+  const t = full.trim();
+  const modelRe = /^##\s*Model\b/im;
+  const bgRe = /^##\s*Background\b/im;
+  const mm = t.match(modelRe);
+  if (!mm || mm.index === undefined) return null;
+  const bm = t.match(bgRe);
+
+  let model: string;
+  let background: string;
+
+  if (bm && bm.index !== undefined && bm.index > mm.index) {
+    model = t.slice(mm.index + mm[0].length, bm.index).trim();
+    const afterBg = bm.index + bm[0].length;
+    background = t.slice(afterBg).trim().split(/^##\s/m)[0]?.trim() ?? "";
+  } else {
+    model = t.slice(mm.index + mm[0].length).trim().split(/^##\s/m)[0]?.trim() ?? "";
+    background = "";
+  }
+
+  if (!model) return null;
+  if (!background) {
+    background = DEFAULT_STEP3_BACKGROUND_PROMPT;
+  }
+  return { model, background };
+}
+
+/** Legacy drafts: four angle strings → one character-sheet prompt */
+function migrateOldFourAnglesToSinglePrompt(angles: string[]): string {
+  const hints = [
+    "panel 1 front-facing",
+    "panel 2 three-quarter",
+    "panel 3 three-quarter other side",
+    "panel 4 profile / back / product-use",
+  ];
+  return `A single photorealistic image divided into four equal quadrants (2×2 grid in one picture), same identical person and outfit in each quadrant, pure white seamless studio background, no product or packaging in hands or in frame, no on-image text. ${angles
+    .map((a, i) => `${hints[i] ?? `panel ${i + 1}`}: ${a.trim()}`)
+    .join(" ")}`;
+}
+
+const WORKSPACE_DRAFT_LS_KEY = "darijaScriptAi.workspaceDraft";
+
+type WorkspaceTabId =
+  | "products"
+  | "generate"
+  | "saved"
+  | "videoResult"
+  | "veoResult"
+  | "settings";
+
+type WorkspaceDraftV1 = {
+  v: 1;
+  savedAt: string;
+  selectedProductId: string;
+  customPrompt: string;
+  sceneCount: string;
+  modelGender: ModelGender;
+  modelAge: ModelAge;
+  scriptIdea: string | null;
+  voiceOnlyScript: string | null;
+  visualPromptsText: string | null;
+  /** Single prompt: 2×2 character sheet + identity (not four separate prompts) */
+  modelImagePrompt: string | null;
+  backgroundPromptOnly: string | null;
+  generatedScript: string | null;
+  generatedScenes: unknown[] | null;
+  activeTab: WorkspaceTabId;
+  useModelRef: boolean;
+  useProductRef: boolean;
+  useBackgroundRef: boolean;
+  modelImageUrl: string | null;
+  productImageUrl: string | null;
+  backgroundImageUrl: string | null;
+  isScriptCollapsed: boolean;
+  selectedHistoryId: string | null;
+};
+
+const WORKSPACE_TABS: WorkspaceTabId[] = [
+  "products",
+  "generate",
+  "saved",
+  "videoResult",
+  "veoResult",
+  "settings",
+];
+
+function parseSceneCountDraft(raw: unknown): string {
+  const s = String(raw ?? "5");
+  const n = parseInt(s, 10);
+  if (Number.isFinite(n) && n >= 2 && n <= 10) return String(n);
+  return "5";
+}
+
+function parseGenderDraft(raw: unknown): ModelGender {
+  return raw === "woman" || raw === "man" || raw === "any" ? raw : "any";
+}
+
+function parseAgeDraft(raw: unknown): ModelAge {
+  return raw === "young" || raw === "aged" || raw === "any" ? raw : "any";
+}
+
+function parseTabDraft(raw: unknown): WorkspaceTabId {
+  return WORKSPACE_TABS.includes(raw as WorkspaceTabId) ? (raw as WorkspaceTabId) : "products";
+}
+
+function parseNullableString(raw: unknown): string | null {
+  if (raw === null) return null;
+  if (typeof raw === "string") return raw;
+  return null;
+}
+
+function parseModelAnglesDraft(raw: unknown): string[] | null {
+  if (!Array.isArray(raw) || raw.length !== 4) return null;
+  const out = raw.map((x) => (typeof x === "string" ? x : ""));
+  return out.every((s) => s.length > 0) ? out : null;
+}
+
+function loadWorkspaceDraft(): WorkspaceDraftV1 | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(WORKSPACE_DRAFT_LS_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw) as Record<string, unknown>;
+    if (!j || j.v !== 1) return null;
+    const scenes = Array.isArray(j.generatedScenes) ? j.generatedScenes : null;
+    return {
+      v: 1,
+      savedAt: typeof j.savedAt === "string" ? j.savedAt : "",
+      selectedProductId: typeof j.selectedProductId === "string" ? j.selectedProductId : "",
+      customPrompt: typeof j.customPrompt === "string" ? j.customPrompt : "",
+      sceneCount: parseSceneCountDraft(j.sceneCount),
+      modelGender: parseGenderDraft(j.modelGender),
+      modelAge: parseAgeDraft(j.modelAge),
+      scriptIdea: parseNullableString(j.scriptIdea),
+      voiceOnlyScript: parseNullableString(j.voiceOnlyScript),
+      visualPromptsText: parseNullableString(j.visualPromptsText),
+      modelImagePrompt: (() => {
+        const direct = parseNullableString(
+          (j as Record<string, unknown>).modelImagePrompt
+        );
+        if (direct) return direct;
+        const oldAngles = parseModelAnglesDraft(
+          (j as Record<string, unknown>).modelAnglePrompts
+        );
+        return oldAngles ? migrateOldFourAnglesToSinglePrompt(oldAngles) : null;
+      })(),
+      backgroundPromptOnly: parseNullableString(j.backgroundPromptOnly),
+      generatedScript: parseNullableString(j.generatedScript),
+      generatedScenes: scenes,
+      activeTab: parseTabDraft(j.activeTab),
+      useModelRef: j.useModelRef === true,
+      useProductRef: j.useProductRef === true,
+      useBackgroundRef: j.useBackgroundRef === true,
+      modelImageUrl: parseNullableString(j.modelImageUrl),
+      productImageUrl: parseNullableString(j.productImageUrl),
+      backgroundImageUrl: parseNullableString(j.backgroundImageUrl),
+      isScriptCollapsed: j.isScriptCollapsed === true,
+      selectedHistoryId: parseNullableString(j.selectedHistoryId),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveWorkspaceDraft(draft: WorkspaceDraftV1) {
+  try {
+    localStorage.setItem(WORKSPACE_DRAFT_LS_KEY, JSON.stringify(draft));
+  } catch (e) {
+    console.warn("Workspace draft save failed (quota or private mode)", e);
+  }
+}
+
+function clearWorkspaceDraft() {
+  try {
+    localStorage.removeItem(WORKSPACE_DRAFT_LS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+const SCRIPT_PREFS_LS_KEY = "darijaScriptAi.scriptPrefs";
+
+type StoredScriptPrefs = {
+  voiceScriptLanguage?: string;
+  veoAvoidWords?: string;
+};
+
+function loadScriptPrefsFromLS(): {
+  voiceScriptLanguage: VoiceScriptLanguage;
+  veoAvoidWords: string;
+} {
+  const fallback = {
+    voiceScriptLanguage: "darija" as VoiceScriptLanguage,
+    veoAvoidWords: "",
+  };
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(SCRIPT_PREFS_LS_KEY);
+    if (!raw) return fallback;
+    const j = JSON.parse(raw) as StoredScriptPrefs;
+    const langRaw = j.voiceScriptLanguage;
+    const voiceScriptLanguage = (
+      ["darija", "darija_french", "french", "msa"].includes(String(langRaw))
+        ? langRaw
+        : fallback.voiceScriptLanguage
+    ) as VoiceScriptLanguage;
+    const veoAvoidWords = typeof j.veoAvoidWords === "string" ? j.veoAvoidWords : "";
+    return { voiceScriptLanguage, veoAvoidWords };
+  } catch {
+    return fallback;
+  }
+}
+
+const SAVED_SCRIPT_CONTEXT_MAX = 1800;
+
+function truncateForStyleContext(s: string, max: number): string {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+function VoiceLanguageSelect(props: {
+  value: VoiceScriptLanguage;
+  onChange: (v: VoiceScriptLanguage) => void;
+  id?: string;
+}) {
+  const { value, onChange, id } = props;
+  return (
+    <select
+      id={id}
+      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+      value={value}
+      onChange={(e) => onChange(e.target.value as VoiceScriptLanguage)}
+    >
+      <option value="darija">
+        Darija — kelmāt sāḥla (sahəl l‑tape o TTS)
+      </option>
+      <option value="darija_french">Darija + Fransi (mchakhatt)</option>
+      <option value="french">Français</option>
+      <option value="msa">العربية الفصحى (MSA)</option>
+    </select>
+  );
 }
 
 const extractAudioBase64 = async (file: File): Promise<string> => {
@@ -546,6 +846,21 @@ const parseScenesData = (scenesData: any) => {
 };
 
 export default function App() {
+  const workspaceDraft = useMemo(() => {
+    const d = loadWorkspaceDraft();
+    if (!d?.visualPromptsText?.trim() || d.modelImagePrompt != null) return d;
+    const p = parseStep3ModelBackground(d.visualPromptsText.trim());
+    if (p) {
+      return {
+        ...d,
+        modelImagePrompt: p.model,
+        backgroundPromptOnly: p.background,
+        visualPromptsText: buildStep3VisualMarkdown(p.model, p.background),
+      };
+    }
+    return d;
+  }, []);
+
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   
@@ -553,7 +868,9 @@ export default function App() {
   const [videos, setVideos] = useState<VideoData[]>([]);
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   
-  const [activeTab, setActiveTab] = useState<'products' | 'generate' | 'saved' | 'videoResult' | 'veoResult'>('products');
+  const [activeTab, setActiveTab] = useState<
+    "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
+  >(() => workspaceDraft?.activeTab ?? "products");
   const [expandedProducts, setExpandedProducts] = useState<Record<string, boolean>>({});
   
   // Modal State
@@ -563,32 +880,82 @@ export default function App() {
   const [newProductScriptDetails, setNewProductScriptDetails] = useState('');
   
   // Generation State
-  const [selectedProductId, setSelectedProductId] = useState<string>('');
-  const [customPrompt, setCustomPrompt] = useState('');
-  const [duration, setDuration] = useState('40-50');
-  const [sceneCount, setSceneCount] = useState('auto');
-  const [useModelRef, setUseModelRef] = useState(false);
-  const [useProductRef, setUseProductRef] = useState(false);
-  const [useBackgroundRef, setUseBackgroundRef] = useState(false);
+  const [selectedProductId, setSelectedProductId] = useState<string>(
+    () => workspaceDraft?.selectedProductId ?? ""
+  );
+  const [customPrompt, setCustomPrompt] = useState(() => workspaceDraft?.customPrompt ?? "");
+  const [veoAvoidWords, setVeoAvoidWords] = useState(() => loadScriptPrefsFromLS().veoAvoidWords);
+  const [voiceScriptLanguage, setVoiceScriptLanguage] = useState<VoiceScriptLanguage>(() =>
+    loadScriptPrefsFromLS().voiceScriptLanguage
+  );
+  const [sceneCount, setSceneCount] = useState(() => workspaceDraft?.sceneCount ?? "5");
+  const [modelGender, setModelGender] = useState<ModelGender>(
+    () => workspaceDraft?.modelGender ?? "any"
+  );
+  const [modelAge, setModelAge] = useState<ModelAge>(() => workspaceDraft?.modelAge ?? "any");
+  const [useModelRef, setUseModelRef] = useState(() => workspaceDraft?.useModelRef ?? false);
+  const [useProductRef, setUseProductRef] = useState(() => workspaceDraft?.useProductRef ?? false);
+  const [useBackgroundRef, setUseBackgroundRef] = useState(
+    () => workspaceDraft?.useBackgroundRef ?? false
+  );
   const [modelImageFile, setModelImageFile] = useState<File | null>(null);
   const [productImageFile, setProductImageFile] = useState<File | null>(null);
   const [backgroundImageFile, setBackgroundImageFile] = useState<File | null>(null);
-  const [modelImageUrl, setModelImageUrl] = useState<string | null>(null);
-  const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
-  const [backgroundImageUrl, setBackgroundImageUrl] = useState<string | null>(null);
+  const [modelImageUrl, setModelImageUrl] = useState<string | null>(
+    () => workspaceDraft?.modelImageUrl ?? null
+  );
+  const [productImageUrl, setProductImageUrl] = useState<string | null>(
+    () => workspaceDraft?.productImageUrl ?? null
+  );
+  const [backgroundImageUrl, setBackgroundImageUrl] = useState<string | null>(
+    () => workspaceDraft?.backgroundImageUrl ?? null
+  );
   const [isUploadingModel, setIsUploadingModel] = useState(false);
   const [isUploadingProduct, setIsUploadingProduct] = useState(false);
   const [isUploadingBackground, setIsUploadingBackground] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [generatedScript, setGeneratedScript] = useState<string | null>(null);
-  const [generatedScenes, setGeneratedScenes] = useState<any[] | null>(null);
+  const [generatingPhase, setGeneratingPhase] = useState<
+    "idea" | "voice" | "visuals" | "video" | null
+  >(null);
+  const [scriptIdea, setScriptIdea] = useState<string | null>(
+    () => workspaceDraft?.scriptIdea ?? null
+  );
+  const [voiceOnlyScript, setVoiceOnlyScript] = useState<string | null>(
+    () => workspaceDraft?.voiceOnlyScript ?? null
+  );
+  const [visualPromptsText, setVisualPromptsText] = useState<string | null>(
+    () => workspaceDraft?.visualPromptsText ?? null
+  );
+  /** Step 3: single model image prompt (e.g. one 2×2 character sheet) + background-only */
+  const [modelImagePrompt, setModelImagePrompt] = useState<string | null>(
+    () => workspaceDraft?.modelImagePrompt ?? null
+  );
+  const [backgroundPromptOnly, setBackgroundPromptOnly] = useState<string | null>(
+    () => workspaceDraft?.backgroundPromptOnly ?? null
+  );
+  /** Bumps when Step 3 history in localStorage changes so Settings can show a fresh count */
+  const [visualPromptHistoryTick, setVisualPromptHistoryTick] = useState(0);
+  const usedStep3VisualCount = useMemo(() => {
+    void visualPromptHistoryTick;
+    return loadUsedVisualPrompts().models.length;
+  }, [visualPromptHistoryTick]);
+  const [generatedScript, setGeneratedScript] = useState<string | null>(
+    () => workspaceDraft?.generatedScript ?? null
+  );
+  const [generatedScenes, setGeneratedScenes] = useState<any[] | null>(
+    () => (workspaceDraft?.generatedScenes as any[] | null) ?? null
+  );
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   const [webhookResponseText, setWebhookResponseText] = useState<string | null>(null);
   const [webhookResponseData, setWebhookResponseData] = useState<any | null>(null);
   const [veoResponseData, setVeoResponseData] = useState<any | null>(null);
   const [webhookHistory, setWebhookHistory] = useState<WebhookHistoryItem[]>([]);
-  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
-  const [isScriptCollapsed, setIsScriptCollapsed] = useState(false);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(
+    () => workspaceDraft?.selectedHistoryId ?? null
+  );
+  const [isScriptCollapsed, setIsScriptCollapsed] = useState(
+    () => workspaceDraft?.isScriptCollapsed ?? false
+  );
   
   // Saved Script Webhook Modal State
   const [scriptToSend, setScriptToSend] = useState<SavedScript | null>(null);
@@ -603,14 +970,12 @@ export default function App() {
   const [isUploadingSavedBackground, setIsUploadingSavedBackground] = useState(false);
   
   // Settings State
-  const [showSettings, setShowSettings] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState(() => localStorage.getItem('makeWebhookUrl') || '');
   const [imagesWebhookUrl, setImagesWebhookUrl] = useState(() => localStorage.getItem('imagesWebhookUrl') || '');
+  const [isSavingWebhookSettings, setIsSavingWebhookSettings] = useState(false);
   const [isSendingWebhook, setIsSendingWebhook] = useState(false);
   const [isSendingImages, setIsSendingImages] = useState(false);
   const [webhookStatus, setWebhookStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  /** TEMP: one-click push localforage sceneImages + webhooks → Supabase */
-  const [isMigratingLocal, setIsMigratingLocal] = useState(false);
 
   // Transcription State
   const [pendingVideos, setPendingVideos] = useState<PendingVideo[]>([]);
@@ -656,12 +1021,79 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [pendingVideos]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SCRIPT_PREFS_LS_KEY,
+        JSON.stringify({
+          voiceScriptLanguage,
+          veoAvoidWords,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [voiceScriptLanguage, veoAvoidWords]);
+
   const [copied, setCopied] = useState(false);
   /** Set when Supabase list queries fail — otherwise the UI looks “empty” with no explanation */
   const [dataSyncError, setDataSyncError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sceneImages, setSceneImages] = useState<Record<string, string>>({});
   const [isUploadingSceneImage, setIsUploadingSceneImage] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      saveWorkspaceDraft({
+        v: 1,
+        savedAt: new Date().toISOString(),
+        selectedProductId,
+        customPrompt,
+        sceneCount,
+        modelGender,
+        modelAge,
+        scriptIdea,
+        voiceOnlyScript,
+        visualPromptsText,
+        modelImagePrompt,
+        backgroundPromptOnly,
+        generatedScript,
+        generatedScenes,
+        activeTab,
+        useModelRef,
+        useProductRef,
+        useBackgroundRef,
+        modelImageUrl,
+        productImageUrl,
+        backgroundImageUrl,
+        isScriptCollapsed,
+        selectedHistoryId,
+      });
+    }, 450);
+    return () => window.clearTimeout(id);
+  }, [
+    selectedProductId,
+    customPrompt,
+    sceneCount,
+    modelGender,
+    modelAge,
+    scriptIdea,
+    voiceOnlyScript,
+    visualPromptsText,
+    modelImagePrompt,
+    backgroundPromptOnly,
+    generatedScript,
+    generatedScenes,
+    activeTab,
+    useModelRef,
+    useProductRef,
+    useBackgroundRef,
+    modelImageUrl,
+    productImageUrl,
+    backgroundImageUrl,
+    isScriptCollapsed,
+    selectedHistoryId,
+  ]);
 
   const refreshUserData = useCallback(async (userId: string) => {
     try {
@@ -789,9 +1221,6 @@ export default function App() {
     setSavedScripts(scriptsMapped);
     setWebhookHistory(historyMapped);
 
-    void localforage.setItem(LF_PRODUCTS_MIRROR, productsMapped).catch(() => {});
-    void localforage.setItem(LF_VIDEOS_MIRROR, videosMapped).catch(() => {});
-
     setSceneImages((prev) => {
       const updated = { ...prev };
       let hasChanges = false;
@@ -818,102 +1247,6 @@ export default function App() {
       );
     }
   }, []);
-
-  const syncLocalDataToSupabase = useCallback(async () => {
-    if (!user) return;
-    setIsMigratingLocal(true);
-    setError(null);
-    try {
-      const fromLf = await localforage.getItem<Record<string, string>>("sceneImages");
-      const lfObj =
-        fromLf && typeof fromLf === "object" && !Array.isArray(fromLf) ? fromLf : {};
-      const mergedLocal: Record<string, string> = { ...lfObj, ...sceneImages };
-
-      let mkLs = "";
-      let imLs = "";
-      try {
-        mkLs = localStorage.getItem("makeWebhookUrl")?.trim() ?? "";
-        imLs = localStorage.getItem("imagesWebhookUrl")?.trim() ?? "";
-      } catch {
-        /* ignore */
-      }
-      const makeUrl = webhookUrl.trim() || mkLs;
-      const imagesUrl = imagesWebhookUrl.trim() || imLs;
-
-      const { error: upsertErr } = await supabase.from("user_app_settings").upsert(
-        {
-          owner_id: user.id,
-          make_webhook_url: makeUrl,
-          images_webhook_url: imagesUrl,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "owner_id" }
-      );
-      if (upsertErr) throw upsertErr;
-      try {
-        localStorage.setItem("makeWebhookUrl", makeUrl);
-        localStorage.setItem("imagesWebhookUrl", imagesUrl);
-      } catch {
-        /* ignore */
-      }
-      setWebhookUrl(makeUrl);
-      setImagesWebhookUrl(imagesUrl);
-
-      const byHistory: Record<string, Record<string, string>> = {};
-      for (const [key, url] of Object.entries(mergedLocal)) {
-        const parsed = parseSceneImageKey(key);
-        if (!parsed) continue;
-        if (!byHistory[parsed.historyId]) byHistory[parsed.historyId] = {};
-        byHistory[parsed.historyId][key] = url;
-      }
-
-      let scenesUpdated = 0;
-      const historyIds = Object.keys(byHistory);
-      for (const historyId of historyIds) {
-        const patch = byHistory[historyId];
-        const { data: row, error: fe } = await supabase
-          .from("video_history")
-          .select("scene_images")
-          .eq("id", historyId)
-          .eq("owner_id", user.id)
-          .maybeSingle();
-        if (fe) {
-          handleDbError(fe, OperationType.GET, `video_history/${historyId}`);
-          continue;
-        }
-        if (!row) continue;
-        const existing =
-          row.scene_images &&
-          typeof row.scene_images === "object" &&
-          !Array.isArray(row.scene_images)
-            ? (row.scene_images as Record<string, string>)
-            : {};
-        const merged = { ...existing, ...patch };
-        const { error: ue } = await supabase
-          .from("video_history")
-          .update({ scene_images: merged })
-          .eq("id", historyId)
-          .eq("owner_id", user.id);
-        if (!ue) scenesUpdated++;
-        else handleDbError(ue, OperationType.UPDATE, `video_history/${historyId}`);
-      }
-
-      const productsRestored = await rehydrateProductsFromMirror(user.id);
-      const videosRestored = await rehydrateVideosFromMirror(user.id);
-      const videosFromQueue = await flushVideoOfflineQueue(user.id);
-
-      await refreshUserData(user.id);
-      alert(
-        `Sauvegard f Supabase OK.\nWebhooks: OK.\nScene images: ${scenesUpdated} / ${historyIds.length} history.\n` +
-          `Produits (mirror): +${productsRestored}\nVideos (mirror): +${videosRestored}\nVideos (queue): +${videosFromQueue}`
-      );
-    } catch (e) {
-      console.error(e);
-      alert(formatDbErrorForLog(e));
-    } finally {
-      setIsMigratingLocal(false);
-    }
-  }, [user, sceneImages, webhookUrl, imagesWebhookUrl, refreshUserData]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1227,18 +1560,7 @@ export default function App() {
       };
       if (thumbnailBase64) insertPayload.thumbnail_base64 = thumbnailBase64;
       const { error: vidErr } = await supabase.from("videos").insert(insertPayload);
-      if (vidErr) {
-        await appendVideoOfflineQueue({
-          clientId: pendingVideo.id,
-          productId: pendingVideo.productId,
-          name: pendingVideo.file.name,
-          transcription,
-          thumbnailBase64: thumbnailBase64 || undefined,
-          example_kind: pendingVideo.exampleKind,
-        });
-        throw vidErr;
-      }
-      await removeVideoOfflineQueueByClientId(pendingVideo.id);
+      if (vidErr) throw vidErr;
       await refreshUserData(user!.id);
 
       // Remove from pending videos so UI updates instantly
@@ -1261,160 +1583,504 @@ export default function App() {
     });
   };
 
-  const generateScript = async () => {
+  type ScriptGenBundle = {
+    productInfo: string;
+    context: string;
+    wordCountHint: string;
+    sceneInstruction: string;
+    sceneCountNum: number;
+    totalVideoSeconds: number;
+    videoTimingBlock: string;
+    arabicDurationLine: string;
+    styleInstruction: string;
+    voiceLanguageBlock: string;
+    tashkeelBlock: string;
+    veoAvoidBlock: string;
+    veoLockedVoiceNote: string;
+    isUniqueRequested: boolean;
+    temperature: number;
+  };
+
+  const buildScriptGenerationBundle = (): ScriptGenBundle | null => {
+    if (!selectedProductId) return null;
+
+    const relevantVideos =
+      selectedProductId === "all"
+        ? videos
+        : videos.filter((v) => v.productId === selectedProductId);
+
+    const sameProductExamples = relevantVideos.filter(
+      (v) => (v.exampleKind ?? "same_product") === "same_product"
+    );
+    const sameEffectExamples = relevantVideos.filter(
+      (v) => (v.exampleKind ?? "same_product") === "same_effect"
+    );
+
+    const section = (title: string, list: VideoData[]) =>
+      list.length
+        ? `## ${title}\n\n${list
+            .map((v) => `Example Script:\n${v.transcription}`)
+            .join("\n\n---\n\n")}`
+        : "";
+
+    const relevantSaved =
+      selectedProductId === "all"
+        ? savedScripts.slice(0, 6)
+        : savedScripts.filter((s) => s.productId === selectedProductId).slice(0, 6);
+
+    const savedScriptsSection =
+      relevantSaved.length > 0
+        ? `## Style Examples (Saved full scripts in app)\n\n${relevantSaved
+            .map(
+              (s) =>
+                `Saved script (voice / structure excerpt):\n${truncateForStyleContext(s.content, SAVED_SCRIPT_CONTEXT_MAX)}`
+            )
+            .join("\n\n---\n\n")}`
+        : "";
+
+    const contextParts = [
+      section("Style Examples (Same Product)", sameProductExamples),
+      section("Style Examples (Same Effect / Same Result)", sameEffectExamples),
+      savedScriptsSection,
+    ].filter(Boolean);
+
+    const context = contextParts.join("\n\n\n");
+
+    let productInfo = "All Products";
+    if (selectedProductId !== "all") {
+      const product = products.find((p) => p.id === selectedProductId);
+      if (product) {
+        const details = (product.scriptDetails ?? "").trim();
+        const fallbackDetails = details || (product.description ?? "").trim();
+        productInfo = `Product: ${product.name}\nDescription: ${product.description}\nScript Details (extra context): ${fallbackDetails || "N/A"}`;
+      }
+    }
+
+    const sceneCountNum = parseSceneCountForVideo(sceneCount);
+    const totalVideoSeconds = sceneCountNum * SECONDS_PER_SCENE;
+    const videoTimingBlock = `VIDEO STRUCTURE: EXACTLY ${sceneCountNum} scenes. Each scene is EXACTLY ${SECONDS_PER_SCENE} seconds. Total ≈ ${totalVideoSeconds} seconds.`;
+    const arabicDurationLine = `${totalVideoSeconds} ثانية (${sceneCountNum} مشهد، كل مشهد 8 ثواني)`;
+    const wordCountHint = wordCountHintFromTotalSeconds(totalVideoSeconds);
+
+    const isUniqueRequested = customPrompt.toLowerCase().includes("unique");
+    const styleInstruction = isUniqueRequested
+      ? "CRITICAL INSTRUCTION: The user requested a UNIQUE script. DO NOT copy the examples. You MUST generate a completely NEW, UNIQUE, and DIFFERENT script. Do not repeat the exact same hooks or phrases."
+      : "INSTRUCTION: You can take inspiration, mix, and match elements from the Style Examples above (video transcriptions + saved script excerpts) for pacing, hooks, and vibe. DO NOT output the exact same script. Create a fresh variation.";
+
+    const sceneInstruction = `CRITICAL INSTRUCTION: You MUST divide the script into EXACTLY ${sceneCountNum} scenes. Each scene is EXACTLY ${SECONDS_PER_SCENE} seconds (total ${totalVideoSeconds} seconds). Scene timecodes: Scene 1 = 0–${SECONDS_PER_SCENE}s, Scene 2 = ${SECONDS_PER_SCENE}–${SECONDS_PER_SCENE * 2}s, … Scene ${sceneCountNum} = ${(sceneCountNum - 1) * SECONDS_PER_SCENE}–${totalVideoSeconds}s.`;
+
+    const veoAvoidBlock = formatVeoAvoidWordsBlock(veoAvoidWords);
+    const veoLockedVoiceNote = veoAvoidBlock
+      ? "FORBIDDEN WORDS above apply to every NEW line you write (Text on Screen, visual descriptions, extra tips). The [النص الصوتي - Voice Script] lines in each scene and the 🎙️ Full Voice Script block MUST stay character-identical to the LOCKED VOICE SCRIPT — edit Step 2 if a banned term appears there."
+      : "";
+
+    return {
+      productInfo,
+      context,
+      wordCountHint,
+      sceneInstruction,
+      sceneCountNum,
+      totalVideoSeconds,
+      videoTimingBlock,
+      arabicDurationLine,
+      styleInstruction,
+      voiceLanguageBlock: voiceLanguagePromptBlock(voiceScriptLanguage),
+      tashkeelBlock: tashkeelAndOrthographyBlock(voiceScriptLanguage),
+      veoAvoidBlock,
+      veoLockedVoiceNote,
+      isUniqueRequested,
+      temperature: isUniqueRequested ? 0.9 : 0.7,
+    };
+  };
+
+  const saveWebhookSettings = useCallback(async () => {
+    const mk = webhookUrl.trim();
+    const im = imagesWebhookUrl.trim();
+    try {
+      localStorage.setItem("makeWebhookUrl", mk);
+      localStorage.setItem("imagesWebhookUrl", im);
+    } catch {
+      /* ignore */
+    }
+    if (!user) {
+      alert(
+        "Webhooks m-sauvegarder f l-appareil (localStorage). Dkhol b-compte bach t-sauvegard f Supabase."
+      );
+      return;
+    }
+    setIsSavingWebhookSettings(true);
+    try {
+      const { error } = await supabase.from("user_app_settings").upsert(
+        {
+          owner_id: user.id,
+          make_webhook_url: mk,
+          images_webhook_url: im,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "owner_id" }
+      );
+      if (error) {
+        alert(formatDbErrorForLog(error));
+        return;
+      }
+      alert("Webhooks m-sauvegarder f Supabase + local.");
+    } finally {
+      setIsSavingWebhookSettings(false);
+    }
+  }, [user, webhookUrl, imagesWebhookUrl]);
+
+  const callAiChat = async (prompt: string, temperature: number) => {
+    const chatRes = await fetch(apiUrl("/api/ai/chat"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: prompt }],
+        temperature,
+      }),
+    });
+    const chatJson = (await chatRes.json().catch(() => ({}))) as {
+      text?: string;
+      error?: string;
+    };
+    if (!chatRes.ok) {
+      throw new Error(chatJson.error || `Generi HTTP ${chatRes.status}`);
+    }
+    const responseText = chatJson.text?.trim();
+    if (!responseText) {
+      throw new Error("Smah lina, ma9dernach n-generiw t-text.");
+    }
+    return responseText;
+  };
+
+  const generateScriptIdea = async () => {
     if (!selectedProductId) {
       setError("3afak khtar produit wla 'Ga3 l-Produits'.");
       return;
     }
+    const b = buildScriptGenerationBundle();
+    if (!b) return;
 
     setIsGenerating(true);
+    setGeneratingPhase("idea");
     setError(null);
-
     try {
-      // Use transcriptions from selected product or all products
-      const relevantVideos = selectedProductId === 'all' 
-        ? videos 
-        : videos.filter(v => v.productId === selectedProductId);
-        
-      const sameProductExamples = relevantVideos.filter(
-        (v) => (v.exampleKind ?? 'same_product') === 'same_product'
-      );
-      const sameEffectExamples = relevantVideos.filter(
-        (v) => (v.exampleKind ?? 'same_product') === 'same_effect'
-      );
+      setScriptIdea(null);
+      setVoiceOnlyScript(null);
+      setVisualPromptsText(null);
+      setModelImagePrompt(null);
+      setBackgroundPromptOnly(null);
+      setGeneratedScript(null);
+      setGeneratedScenes(null);
 
-      const section = (title: string, list: VideoData[]) =>
-        list.length
-          ? `## ${title}\n\n${list
-              .map((v) => `Example Script:\n${v.transcription}`)
-              .join('\n\n---\n\n')}`
-          : '';
+      const prompt = `You are an expert Moroccan TikTok ad creative strategist.
+Propose a sharp ad concept (not the final voiceover yet).
 
-      const contextParts = [
-        section('Style Examples (Same Product)', sameProductExamples),
-        section('Style Examples (Same Effect / Same Result)', sameEffectExamples),
-      ].filter(Boolean);
+${b.voiceLanguageBlock}
 
-      const context = contextParts.join('\n\n\n');
-      
-      let productInfo = "All Products";
-      if (selectedProductId !== 'all') {
-        const product = products.find(p => p.id === selectedProductId);
-        if (product) {
-          const details = (product.scriptDetails ?? "").trim();
-          const fallbackDetails = details || (product.description ?? "").trim();
-          productInfo = `Product: ${product.name}\nDescription: ${product.description}\nScript Details (extra context): ${fallbackDetails || "N/A"}`;
-        }
-      }
+Write the creative substance in the same language family as the VOICE LANGUAGE above (concept beats, hook angle, emotional arc, CTA direction). You may keep these section titles in Arabic with markdown **bold** exactly as listed:
 
-      let wordCountHint = "";
-      if (duration === "0-15") wordCountHint = "CRITICAL: The script MUST be EXTREMELY SHORT (max 20-30 words total). Very fast-paced hook and CTA only.";
-      else if (duration === "15-20") wordCountHint = "CRITICAL: The script MUST be VERY SHORT (max 30-40 words total). Keep it extremely punchy and fast. DO NOT write a long script.";
-      else if (duration === "20-30") wordCountHint = "CRITICAL: The script MUST be SHORT (around 50-60 words total). Fast-paced, straight to the point.";
-      else if (duration === "30-40") wordCountHint = "CRITICAL: The script MUST be SHORT-MEDIUM (around 70-80 words total). Good pacing.";
-      else if (duration === "40-50") wordCountHint = "CRITICAL: The script MUST be MEDIUM length (around 100-120 words total).";
-      else if (duration === "50-60") wordCountHint = "CRITICAL: The script MUST be MEDIUM-LONG length (around 130-140 words total).";
-      else if (duration === "60+") wordCountHint = "CRITICAL: The script MUST be LONG (150+ words total). Detailed storytelling.";
+Product Info: Name and Description
+${b.productInfo}
 
-      const isUniqueRequested = customPrompt.toLowerCase().includes('unique');
-      const styleInstruction = isUniqueRequested 
-        ? "CRITICAL INSTRUCTION: The user requested a UNIQUE script. DO NOT copy the examples. You MUST generate a completely NEW, UNIQUE, and DIFFERENT script. Do not repeat the exact same hooks or phrases."
-        : "INSTRUCTION: You can take inspiration, mix, and match elements from the 'Style Examples' above to match the user's preferred style. However, DO NOT output the exact same script. Create a fresh variation.";
+${b.videoTimingBlock}
+${b.wordCountHint}
 
-      let sceneInstruction = "CRITICAL INSTRUCTION: Divide the script into scenes of approximately 8 seconds each (e.g., 4 or 5 scenes depending on the total duration).";
-      if (sceneCount !== 'auto') {
-        sceneInstruction = `CRITICAL INSTRUCTION: You MUST divide the script into EXACTLY ${sceneCount} scenes.`;
-      }
+User's Custom Instructions / Tone:
+${customPrompt || "Make it engaging and viral."}
 
-      const prompt = `
-        You are an expert Moroccan TikTok Ad Script Writer. 
-        Write a high-converting script in Moroccan Darija.
-        
-        ${productInfo}
+Style Examples from previous videos:
+${b.context || "Standard high-energy Moroccan TikTok slang."}
 
-        Style Examples (use to match tone, rhythm, and structure — do NOT copy text verbatim):
-        ${context || "No examples available."}
-        
-        Target Duration: ${duration} seconds.
-        ${wordCountHint}
-        
-        User's Custom Instructions / Tone:
-        ${customPrompt || "Make it engaging and viral."}
+${b.styleInstruction}
 
-        You MUST follow this EXACT structure and format (in Arabic/Darija) with the exact markdown bolding:
-        
-        بصفتي خبير في كتابة إعلانات تيك توك بالمغرب، أؤكد لك أن هذا السكريبت سيكون له تأثير قوي جداً (High Conversion Rate). تلبيةً لطلبك، السكريبت **مختلف كلياً (Unique)** عن الإعلانات السابقة، و**يبدأ مباشرة بالنتيجة المبهرة** كما طلبت. البدء بالنتيجة يخطف انتباه المشاهد (Stop the scroll) في الثواني الأولى ويجعله يتساءل: "كيفاش دارت ليها؟"، مما يرفع نسبة المشاهدة الكاملة للفيديو.
-        
-        📝 **هيكل الإعلان (TikTok Ad Script)**
-        المنتج: [Product Name]
-        المدة المتوقعة: ${duration} ثانية.
+${b.tashkeelBlock}
+${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
 
-        🎬 **السكريبت الصوتي (Voice Script) والتعليمات البصرية:**
-        ${sceneInstruction}
+Required sections (fill under each title, be concise — strategy only, no scene list, no full spoken script):
+**الفكرة الأساسية**
+**زاوية الخطاف (Hook)**
+**المسار العاطفي**
+**اتجاه الـ CTA**`;
 
-        **المشهد 1 (Scene 1) - الخطاف (HOOK) - من 0 إلى X ثواني**
-        [شنو تبيني فالفيديو]: ...
-        [النص الصوتي - Voice Script]: ...
-
-        **المشهد 2 (Scene 2) - من X إلى Y ثانية**
-        [شنو تبيني فالفيديو]: ...
-        [النص الصوتي - Voice Script]: ...
-        
-        (Continue adding scenes until the target duration or scene count is reached. The last scene should include the CTA).
-
-        ---
-
-        💡 **نصائح إضافية لنجاح الإعلان (Text On Screen):**
-        *   **الثانية X-Y:** اكتب الفوق بالبنط العريض: "..."
-        (Provide text to display on screen at specific seconds)
-
-        **نصيحة في الأداء الصوتي:**
-        *   **في المشهد الأول:** ...
-        *   **في المشهد الثاني والثالث:** ...
-        (Provide tips on how to deliver the voiceover)
-
-        ---
-
-        🎙️ **السكريبت الصوتي الكامل (Full Voice Script):**
-        (Provide the complete voice script from start to finish in one continuous block of text here, so it's easy to read for recording. ONLY the spoken words, no visual instructions).
-
-        Style Examples from previous videos:
-        ${context || "Standard high-energy Moroccan TikTok slang."}
-
-        ${styleInstruction}
-      `;
-
-      const chatRes = await fetch(apiUrl("/api/ai/chat"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [{ role: "user", content: prompt }],
-          temperature: isUniqueRequested ? 0.9 : 0.7,
-        }),
-      });
-      const chatJson = (await chatRes.json().catch(() => ({}))) as {
-        text?: string;
-        error?: string;
-      };
-      if (!chatRes.ok) {
-        throw new Error(
-          chatJson.error || `Generi HTTP ${chatRes.status}`
-        );
-      }
-
-      const responseText = chatJson.text?.trim();
-      if (responseText) {
-        setGeneratedScript(responseText);
-        setGeneratedScenes(null);
-      } else {
-        setGeneratedScript("Smah lina, ma9dernach n-generiw script.");
-      }
-
+      const text = await callAiChat(prompt, b.temperature);
+      setScriptIdea(text);
     } catch (err) {
       console.error(err);
       setError(generationErrorMessage(err));
     } finally {
       setIsGenerating(false);
+      setGeneratingPhase(null);
+    }
+  };
+
+  const generateVoiceOnlyScript = async () => {
+    if (!selectedProductId) {
+      setError("3afak khtar produit wla 'Ga3 l-Produits'.");
+      return;
+    }
+    if (!scriptIdea?.trim()) {
+      setError("3afak dir l-fikra lwl (Step 1) blast ma t-kammel.");
+      return;
+    }
+    const b = buildScriptGenerationBundle();
+    if (!b) return;
+
+    setIsGenerating(true);
+    setGeneratingPhase("voice");
+    setError(null);
+    try {
+      setVoiceOnlyScript(null);
+      setVisualPromptsText(null);
+      setModelImagePrompt(null);
+      setBackgroundPromptOnly(null);
+      setGeneratedScript(null);
+      setGeneratedScenes(null);
+
+      const prompt = `You are an expert Moroccan TikTok voiceover writer. Output ONLY spoken words for the full ad.
+
+${b.voiceLanguageBlock}
+
+Product Info: Name and Description
+${b.productInfo}
+
+${b.videoTimingBlock}
+${b.wordCountHint}
+
+User's Custom Instructions / Tone:
+${customPrompt || "Make it engaging and viral."}
+
+Creative idea (follow this angle closely):
+${scriptIdea}
+
+Style Examples from previous videos:
+${b.context || "Standard high-energy Moroccan TikTok slang."}
+
+${b.styleInstruction}
+
+${b.tashkeelBlock}
+${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
+
+TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly following the VOICE LANGUAGE, script orthography / vocalization rules, and pronunciation rules above.
+- One continuous block; short line breaks between beats are OK.
+- NO markdown headings, NO scene labels, NO visual/B-roll instructions, NO bracketed stage directions.
+- Respect the word-count / duration rules strictly.
+- Do not add a title or preamble — start directly with the first spoken words.`;
+
+      const text = await callAiChat(prompt, b.temperature);
+      setVoiceOnlyScript(text);
+    } catch (err) {
+      console.error(err);
+      setError(generationErrorMessage(err));
+    } finally {
+      setIsGenerating(false);
+      setGeneratingPhase(null);
+    }
+  };
+
+  const generateVisualPrompts = async () => {
+    if (!selectedProductId) {
+      setError("3afak khtar produit wla 'Ga3 l-Produits'.");
+      return;
+    }
+    if (!voiceOnlyScript?.trim()) {
+      setError("3afak kammel Step 2 (script swoti) blast ma t-zid prompts.");
+      return;
+    }
+    const b = buildScriptGenerationBundle();
+    if (!b) return;
+
+    setIsGenerating(true);
+    setGeneratingPhase("visuals");
+    setError(null);
+    try {
+      setVisualPromptsText(null);
+      setModelImagePrompt(null);
+      setBackgroundPromptOnly(null);
+      setGeneratedScript(null);
+      setGeneratedScenes(null);
+
+      const casting =
+        modelGender === "any" && modelAge === "any"
+          ? "Any on-camera talent; natural Moroccan TikTok creator look."
+          : `Preferred casting: gender ${modelGender}, age vibe ${modelAge}.`;
+
+      const prompt = `You are an expert prompt engineer for AI image and video tools (Veo, reference images, b-roll generators) for Moroccan TikTok / UGC-style ads.
+
+${b.voiceLanguageBlock}
+
+Product Info: Name and Description
+${b.productInfo}
+
+${b.videoTimingBlock}
+
+User's Custom Instructions / Tone:
+${customPrompt || "Make it engaging and viral."}
+
+Creative idea:
+${scriptIdea ?? "(see voice script)"}
+
+LOCKED VOICE SCRIPT (match energy, who speaks on camera, product use):
+---
+${voiceOnlyScript}
+---
+
+Casting: ${casting}
+
+Style Examples (for vibe only):
+${b.context || "Standard high-energy Moroccan TikTok slang."}
+
+${b.styleInstruction}
+
+${b.tashkeelBlock}
+${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
+
+ANTI-REUSE (same browser — mandatory)
+${formatUsedVisualPromptsForAi()}
+You MUST output ONE NEW unified model-image prompt and ONE NEW background plate prompt, clearly different from the history above (not paraphrase).
+
+TASK — Output ONLY markdown in English (French only if the voice script is clearly French-first). Exactly two top-level sections, in order — no emoji in headings.
+
+## Model
+ONE cohesive block (one or two dense paragraphs ONLY) — a single string the user will paste once into an image AI. It MUST instruct the generator to produce exactly ONE image file that is visually SPLIT into FOUR equal parts (a 2×2 layout: top-left, top-right, bottom-left, bottom-right — like a contact sheet or quad-split / four-quadrant composition inside a single frame). Use explicit wording image models understand, e.g. "single image divided into four equal quadrants", "four-panel grid in one picture", "one photograph split into 4 sections". The SAME identical photorealistic person must appear in all four quadrants (strict face, hair/hijab continuity, same outfit in every quadrant).
+
+OUTFIT — Must feel intentional and creator-ready, NOT generic "plain t-shirt only." Specify a rich, tasteful look: layered pieces or structured silhouette, interesting texture and color story (e.g. ribbed knit + tailored layer, quality loungewear set, modest fashion with fabric drape detail, denim + soft knit, coordinated accessories like minimal jewelry or watch, hijab fabric and wrap style if applicable). Makeup: soft camera-ready but still authentic; nails and grooming subtle. The outfit should match the product category mood (wellness, beauty, lifestyle) without looking like a catalog stock photo.
+
+CRITICAL — NO PRODUCT IN MODEL SHOTS: the talent must NOT hold, touch, or display any product, packaging, bottle, tube, jar, box, or brand object. Hands empty or natural gestures only (e.g. relaxed hands, adjusting hair, touching shoulder). Pure white seamless studio cyclorama in every quadrant (talent reference only — no room furniture). NO text, NO logos, NO watermarks; soft even key light + gentle fill; natural skin; Moroccan / North African look when appropriate; respect Casting and forbidden lists. Describe each quadrant (QL1…QL4) for pose and expression only — matching the MOOD of the LOCKED VOICE SCRIPT. Do NOT use "### Angle" subheadings — one continuous paragraph under ## Model.
+
+## Background
+ONE paragraph — empty environment plate for the ENTIRE ad (same room in every scene; not a white cyclorama, not a blank white wall as the whole frame). Describe ONE simple, believable real-world interior with MINIMAL props — calm and uncrowded (avoid shelves packed with objects, busy patterns, or “a lot going on”). Only what fits the product mood: a few honest surfaces (mirror, counter, soft wall color, one plant or towel if needed)— nothing that screams “studio,” “ring light,” “filming setup,” “content creator,” or branded lighting gear. Natural daylight mood, soft and realistic; shallow depth of field OK. Absolutely NO people, NO hands, NO faces, NO reflections of a person, NO lamps or gear aimed at “creator” aesthetics unless it is a normal household lamp in the corner. Brand-safe; respect forbidden term lists.
+
+ALWAYS output BOTH "## Model" and "## Background" sections in full — never omit ## Background.
+
+Do not add any text before "## Model" or after the Background paragraph. Headings must be exactly "## Model" and "## Background".`;
+
+      const text = await callAiChat(prompt, b.temperature);
+      const trimmed = text.trim();
+      const parsed = parseStep3ModelBackground(trimmed);
+      if (parsed) {
+        setModelImagePrompt(parsed.model);
+        setBackgroundPromptOnly(parsed.background);
+        setVisualPromptsText(buildStep3VisualMarkdown(parsed.model, parsed.background));
+        appendUsedVisualPrompts(parsed.model, parsed.background);
+        setVisualPromptHistoryTick((t) => t + 1);
+      } else {
+        setModelImagePrompt(null);
+        setBackgroundPromptOnly(null);
+        setVisualPromptsText(trimmed);
+      }
+    } catch (err) {
+      console.error(err);
+      setError(generationErrorMessage(err));
+    } finally {
+      setIsGenerating(false);
+      setGeneratingPhase(null);
+    }
+  };
+
+  const generateVideoScript = async () => {
+    if (!selectedProductId) {
+      setError("3afak khtar produit wla 'Ga3 l-Produits'.");
+      return;
+    }
+    if (!voiceOnlyScript?.trim()) {
+      setError("3afak generi script swoti (Step 2) blast ma t-kammel.");
+      return;
+    }
+    if (!visualPromptsText?.trim()) {
+      setError("3afak generi prompts dial model o background (Step 3) blast ma t-kammel.");
+      return;
+    }
+    const b = buildScriptGenerationBundle();
+    if (!b) return;
+
+    setIsGenerating(true);
+    setGeneratingPhase("video");
+    setError(null);
+
+    try {
+      const prompt = `You are an expert Moroccan TikTok Ad Script Writer. 
+Write the full video ad breakdown (scenes, visuals, on-screen text, delivery tips). Use Moroccan Darija/Arabic for structure headings, stage directions, and structural visual notes as in the template below; spoken lines must stay exactly the locked script (same language as chosen by the user).
+
+VISUAL ALIGNMENT — Use the LOCKED VISUAL PROMPTS below when writing [شنو تبيني فالفيديو] and any camera/setting notes: (1) Model = quadrants reference — white seamless, talent-only, styled outfit, NO product in hands. (2) Background = ONE simple real interior for the WHOLE video (sparse, not busy; not a white void studio) — SAME room every scene; do NOT change location between scenes unless the creative idea has one explicit exception. Stay consistent.
+
+${b.voiceLanguageBlock}
+
+Product Info: Name and Description
+${b.productInfo}
+
+${b.videoTimingBlock}
+${b.wordCountHint}
+
+User's Custom Instructions / Tone:
+${customPrompt || "Make it engaging and viral."}
+
+${b.tashkeelBlock}
+${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
+
+LOCKED VISUAL PROMPTS (Model = styled talent quadrants on white ref; Background = same simple real room for ALL scenes — do not contradict):
+---
+${visualPromptsText}
+---
+
+LOCKED VOICE SCRIPT — use these EXACT characters for all spoken lines. Split across scenes without changing, adding, or removing any wording or diacritics (only divide into scene-sized chunks):
+---
+${voiceOnlyScript}
+---
+${b.veoLockedVoiceNote ? `\n${b.veoLockedVoiceNote}\n` : ""}
+
+${b.styleInstruction}
+
+You MUST follow this EXACT structure and format (in Arabic/Darija) with the exact markdown bolding. The sum of all [النص الصوتي - Voice Script] lines (minus stage directions) must equal the locked voice script verbatim. The section 🎙️ **السكريبت الصوتي الكامل (Full Voice Script):** must repeat the locked script exactly (spoken words only).
+
+بصفتي خبير في كتابة إعلانات تيك توك بالمغرب، أؤكد لك أن هذا السكريبت سيكون له تأثير قوي جداً (High Conversion Rate). تلبيةً لطلبك، السكريبت **مختلف كلياً (Unique)** عن الإعلانات السابقة، و**يبدأ مباشرة بالنتيجة المبهرة** كما طلبت. البدء بالنتيجة يخطف انتباه المشاهد (Stop the scroll) في الثواني الأولى ويجعله يتساءل: "كيفاش دارت ليها؟"، مما يرفع نسبة المشاهدة الكاملة للفيديو.
+
+📝 **هيكل الإعلان (TikTok Ad Script)**
+المنتج: [Product Name]
+المدة المتوقعة: ${b.arabicDurationLine}
+
+🎬 **السكريبت الصوتي (Voice Script) والتعليمات البصرية:**
+${b.sceneInstruction}
+
+**المشهد 1 (Scene 1) - الخطاف (HOOK) - من 0 إلى 8 ثواني**
+[شنو تبيني فالفيديو]: ...
+[النص الصوتي - Voice Script]: ...
+
+**المشهد 2 (Scene 2) - من 8 إلى 16 ثانية**
+[شنو تبيني فالفيديو]: ...
+[النص الصوتي - Voice Script]: ...
+
+(Continue until all ${b.sceneCountNum} scenes are filled; each scene is exactly 8 seconds — Scene k covers seconds (k-1)×8 to k×8. The last scene must include the CTA).
+
+BACKGROUND LOCK — In [شنو تبيني فالفيديو] for every scene, keep the SAME simple environment as the ## Background prompt (same room and surfaces — calm, not overloaded with new objects each scene). Avoid jumping to a different room or city unless one explicit exception is in the creative idea.
+
+---
+
+💡 **نصائح إضافية لنجاح الإعلان (Text On Screen):**
+*   **الثانية X-Y:** اكتب الفوق بالبنط العريض: "..."
+(Provide text to display on screen at specific seconds)
+
+**نصيحة في الأداء الصوتي:**
+*   **في المشهد الأول:** ...
+*   **في المشهد الثاني والثالث:** ...
+(Provide tips on how to deliver the voiceover — match the actual language of the locked script and keep advice practical for easy pronunciation.)
+
+---
+
+🎙️ **السكريبت الصوتي الكامل (Full Voice Script):**
+(Repeat the locked voice script verbatim here — spoken words only, no visual instructions).
+
+Style Examples from previous videos:
+${b.context || "Standard high-energy Moroccan TikTok slang."}`;
+
+      const responseText = await callAiChat(prompt, b.temperature);
+      setGeneratedScript(responseText);
+      setGeneratedScenes(null);
+    } catch (err) {
+      console.error(err);
+      setError(generationErrorMessage(err));
+    } finally {
+      setIsGenerating(false);
+      setGeneratingPhase(null);
     }
   };
 
@@ -1788,6 +2454,8 @@ export default function App() {
     const webhookVideoId = videoPageDisplayId(historyId);
 
     try {
+      const step3Parsed =
+        visualPromptsText?.trim() ? parseStep3ModelBackground(visualPromptsText.trim()) : null;
       const response = await fetch(webhookUrl, {
         method: "POST",
         headers: {
@@ -1795,10 +2463,18 @@ export default function App() {
         },
         body: JSON.stringify({
           productId: selectedProductId,
-          duration,
           sceneCount,
+          secondsPerScene: SECONDS_PER_SCENE,
+          totalVideoSeconds: parseSceneCountForVideo(sceneCount) * SECONDS_PER_SCENE,
+          voiceScriptLanguage,
+          veoAvoidWords: veoAvoidWords.trim(),
           customPrompt,
+          modelGender,
+          modelAge,
           script: generatedScript,
+          visualPrompts: visualPromptsText?.trim() ?? "",
+          modelPrompt: step3Parsed?.model ?? "",
+          backgroundPrompt: step3Parsed?.background ?? "",
           scenes: generatedScenes ? generatedScenes.map((s) => JSON.stringify(s)).join(", ") : "",
           modelImageUrl,
           productImageUrl,
@@ -1930,16 +2606,18 @@ export default function App() {
       });
       if (scriptErr) throw scriptErr;
 
-      let voiceScriptOnly = "";
-      const marker = "السكريبت الصوتي الكامل";
-      if (generatedScript.includes(marker)) {
-        const parts = generatedScript.split(marker);
-        let lastPart = parts[parts.length - 1];
-        const newlineIndex = lastPart.indexOf('\n');
-        if (newlineIndex !== -1) {
-          voiceScriptOnly = lastPart.substring(newlineIndex + 1).trim();
-        } else {
-          voiceScriptOnly = lastPart.replace(/^[^:]*:\s*/, '').trim();
+      let voiceScriptOnly = (voiceOnlyScript ?? "").trim();
+      if (!voiceScriptOnly) {
+        const marker = "السكريبت الصوتي الكامل";
+        if (generatedScript.includes(marker)) {
+          const parts = generatedScript.split(marker);
+          let lastPart = parts[parts.length - 1];
+          const newlineIndex = lastPart.indexOf("\n");
+          if (newlineIndex !== -1) {
+            voiceScriptOnly = lastPart.substring(newlineIndex + 1).trim();
+          } else {
+            voiceScriptOnly = lastPart.replace(/^[^:]*:\s*/, "").trim();
+          }
         }
       }
 
@@ -2468,7 +3146,7 @@ export default function App() {
               <h1 className="font-bold text-base sm:text-xl tracking-tight truncate">Video Flow</h1>
             </div>
             <div className="flex items-center gap-1 sm:hidden shrink-0">
-              <button onClick={() => setShowSettings(true)} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="Settings">
+              <button onClick={() => setActiveTab("settings")} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="I3dadat">
                 <Settings className="w-5 h-5" />
               </button>
               <button onClick={() => void handleLogout()} className="p-2 text-gray-400 hover:text-red-500 transition-colors" type="button" title="Logout">
@@ -2484,6 +3162,7 @@ export default function App() {
               { id: 'saved', icon: Bookmark, label: 'Mkhbyin' },
               { id: 'videoResult', icon: Video, label: 'Video' },
               { id: 'veoResult', icon: Sparkles, label: 'Veo' },
+              { id: 'settings', icon: Settings, label: 'I3dadat' },
             ].map(tab => (
               <button 
                 key={tab.id}
@@ -2501,7 +3180,7 @@ export default function App() {
           </nav>
 
           <div className="hidden sm:flex items-center gap-2 shrink-0">
-            <button onClick={() => setShowSettings(true)} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="Settings">
+            <button onClick={() => setActiveTab("settings")} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="I3dadat">
               <Settings className="w-5 h-5" />
             </button>
             <button onClick={() => void handleLogout()} className="p-2 text-gray-400 hover:text-red-500 transition-colors" type="button" title="Logout">
@@ -2734,21 +3413,24 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Ch7al mn second bghiti f l-video?</label>
-                    <select 
-                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
-                      value={duration}
-                      onChange={(e) => setDuration(e.target.value)}
-                    >
-                      <option value="0-15">9el mn 15 Thaniya (Khataf)</option>
-                      <option value="15-20">15 - 20 Thaniya (Zerbana)</option>
-                      <option value="20-30">20 - 30 Thaniya (Mzyana)</option>
-                      <option value="30-40">30 - 40 Thaniya (Moutawassita)</option>
-                      <option value="40-50">40 - 50 Thaniya (Mfassla)</option>
-                      <option value="50-60">50 - 60 Thaniya (Chwya Twila)</option>
-                      <option value="60+">Kter mn 60 Thaniya (Twila)</option>
-                    </select>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                      Lougha d script swoti
+                    </label>
+                    <VoiceLanguageSelect
+                      value={voiceScriptLanguage}
+                      onChange={setVoiceScriptLanguage}
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      T9der t-beddel aydan f &quot;I3dadat&quot;. L-exemples jayin men videos dial
+                      produit + scripts li sauvegardit f &quot;Sauvegardés&quot; (nafs produit wla
+                      ga3).
+                    </p>
                   </div>
+                  <p className="text-xs text-gray-500 -mt-1">
+                    B Darija: script b-7roof 3arabiya derya (bla تشكيل على كلم كلم). L-fuṣḥa w
+                    l-jmal li kaybanno bhal l-ktob ma-ykounouch m7ebbin. F MSA: tashkīl 3la
+                    l-kelmāt s3iba. (&quot;I3dadat&quot; → mots Veo.)
+                  </p>
 
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Ch7al mn machhad (Scenes)?</label>
@@ -2757,7 +3439,6 @@ export default function App() {
                       value={sceneCount}
                       onChange={(e) => setSceneCount(e.target.value)}
                     >
-                      <option value="auto">Auto (kol 8 t-tawani)</option>
                       <option value="2">2 Machahid</option>
                       <option value="3">3 Machahid</option>
                       <option value="4">4 Machahid</option>
@@ -2768,6 +3449,40 @@ export default function App() {
                       <option value="9">9 Machahid</option>
                       <option value="10">10 Machahid</option>
                     </select>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Koll machhad = 8 thaniya ({parseSceneCountForVideo(sceneCount) * SECONDS_PER_SCENE}s total).
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                        Model Gender
+                      </label>
+                      <select
+                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+                        value={modelGender}
+                        onChange={(e) => setModelGender(e.target.value as ModelGender)}
+                      >
+                        <option value="any">Any</option>
+                        <option value="woman">Woman</option>
+                        <option value="man">Man</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                        Model Age
+                      </label>
+                      <select
+                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+                        value={modelAge}
+                        onChange={(e) => setModelAge(e.target.value as ModelAge)}
+                      >
+                        <option value="any">Any</option>
+                        <option value="young">Young</option>
+                        <option value="aged">Aged</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div>
@@ -2787,12 +3502,82 @@ export default function App() {
                     </div>
                   )}
 
-                  <button 
-                    onClick={generateScript}
+                  <p className="text-xs text-gray-500">
+                    Kammel 4 d l-marati: l-fikra → script swoti → prompts (model prompt wa7ed fiche 2×2 +
+                    background bla model) → script video (kamal).
+                  </p>
+                  <p className="text-xs text-emerald-700/90">
+                    L-khedma hna kat-tsajjal f navigateur: refresh ma-kaymsa7-ch l-fikra w scripts
+                    (I3dadat → fergh draft ila bghiti t-beddi men sifr).
+                  </p>
+                  <button
+                    type="button"
+                    onClick={generateScriptIdea}
                     disabled={isGenerating || !selectedProductId}
                     className="w-full py-3 bg-orange-500 text-white font-bold rounded-xl shadow-lg shadow-orange-100 flex items-center justify-center gap-2 disabled:opacity-50"
                   >
-                    {isGenerating ? <Loader2 className="w-5 h-5 animate-spin" /> : <><Sparkles className="w-4 h-4" /> Generi Script</>}
+                    {isGenerating && generatingPhase === "idea" ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" /> 1 — Generi l-Fikra
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={generateVoiceOnlyScript}
+                    disabled={
+                      isGenerating ||
+                      !selectedProductId ||
+                      !scriptIdea?.trim()
+                    }
+                    className="w-full py-3 bg-amber-600 text-white font-bold rounded-xl shadow-lg shadow-amber-100/80 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isGenerating && generatingPhase === "voice" ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" /> 2 — Generi Script Swoti
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={generateVisualPrompts}
+                    disabled={
+                      isGenerating ||
+                      !selectedProductId ||
+                      !voiceOnlyScript?.trim()
+                    }
+                    className="w-full py-3 bg-violet-700 text-white font-bold rounded-xl shadow-lg shadow-violet-100 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isGenerating && generatingPhase === "visuals" ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" /> 3 — Generi prompts (model wa7ed + décor)
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={generateVideoScript}
+                    disabled={
+                      isGenerating ||
+                      !selectedProductId ||
+                      !voiceOnlyScript?.trim() ||
+                      !visualPromptsText?.trim()
+                    }
+                    className="w-full py-3 bg-stone-800 text-white font-bold rounded-xl shadow-lg shadow-stone-200 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isGenerating && generatingPhase === "video" ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" /> 4 — Generi Script Video (kamal)
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -2802,9 +3587,12 @@ export default function App() {
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 h-full flex flex-col min-h-[280px] sm:min-h-[400px]">
                 <div className="p-3 sm:p-4 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <h2 className="text-lg font-semibold shrink-0">Natija</h2>
-                  {generatedScript && (
+                  {(scriptIdea ||
+                    voiceOnlyScript != null ||
+                    visualPromptsText != null ||
+                    generatedScript) && (
                     <div className="flex flex-wrap items-center gap-2">
-                      {webhookUrl && (
+                      {webhookUrl && generatedScript && (
                         <button 
                           onClick={sendToWebhook}
                           disabled={
@@ -2827,13 +3615,15 @@ export default function App() {
                           {webhookStatus === 'success' ? 'Sifet!' : webhookStatus === 'error' ? 'Mouchkil' : 'Sifet l-Webhook'}
                         </button>
                       )}
-                      <button 
-                        onClick={saveScript}
-                        className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2 text-sm text-gray-600"
-                      >
-                        <Save className="w-4 h-4" />
-                        Sauvegarder
-                      </button>
+                      {generatedScript && (
+                        <button 
+                          onClick={saveScript}
+                          className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2 text-sm text-gray-600"
+                        >
+                          <Save className="w-4 h-4" />
+                          Sauvegarder
+                        </button>
+                      )}
                       <button 
                         onClick={() => {
                           const scenesText = generatedScenes && generatedScenes.length > 0 ? '\n\n--- PROMPTS ---\n\n' + generatedScenes.map((s: any) => {
@@ -2845,7 +3635,15 @@ export default function App() {
                             const finBackgroundRef = s.fin?.use_background_ref !== undefined ? ` [Background Ref: ${s.fin.use_background_ref ? 'Yes' : 'No'}]` : '';
                             return `Scene ${s.sceneNumber || s.scene_number}:\nDebut${debutModelRef}${debutProductRef}${debutBackgroundRef}: ${s.debut?.prompt || s.debut}\nFin${finModelRef}${finProductRef}${finBackgroundRef}: ${s.fin?.prompt || s.fin}`;
                           }).join('\n\n') : '';
-                          const fullTextToCopy = `${generatedScript}${scenesText}`;
+                          const ideaBlock = scriptIdea ? `## 1. L-Fikra\n\n${scriptIdea}\n\n` : '';
+                          const voiceBlock = voiceOnlyScript ? `## 2. Script swoti\n\n${voiceOnlyScript}\n\n` : '';
+                          const visualBlock = visualPromptsText
+                            ? `## 3. Prompts (model wa7ed + background)\n\n${visualPromptsText}\n\n`
+                            : '';
+                          const scriptBlock = generatedScript
+                            ? `## 4. Script video (kamal)\n\n${generatedScript}`
+                            : '';
+                          const fullTextToCopy = `${ideaBlock}${voiceBlock}${visualBlock}${scriptBlock}${scenesText}`;
                           navigator.clipboard.writeText(fullTextToCopy);
                           setCopied(true);
                           setTimeout(() => setCopied(false), 2000);
@@ -2859,8 +3657,233 @@ export default function App() {
                   )}
                 </div>
                 <div className="p-4 sm:p-6 flex-1 overflow-y-auto min-h-0">
-                  {generatedScript ? (
+                  {(scriptIdea ||
+                    voiceOnlyScript != null ||
+                    visualPromptsText != null ||
+                    generatedScript) ? (
                     <div>
+                      {scriptIdea && (
+                        <div className="mb-6 pb-6 border-b border-gray-100">
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between mb-3">
+                            <h3 className="font-bold text-gray-800">1. L-Fikra</h3>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(scriptIdea);
+                                  alert("T-copia l-fikra!");
+                                }}
+                                className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
+                              >
+                                <Copy className="w-4 h-4 inline mr-1" />
+                                Copi
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void generateScriptIdea()}
+                                disabled={isGenerating || !selectedProductId}
+                                className="text-sm text-gray-700 border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                {isGenerating && generatingPhase === "idea" ? (
+                                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                                ) : (
+                                  <Sparkles className="w-4 h-4 shrink-0" />
+                                )}
+                                Generi merra khra
+                              </button>
+                            </div>
+                          </div>
+                          <div className="prose prose-orange prose-sm max-w-none text-gray-800 bg-amber-50/50 p-4 rounded-xl border border-amber-100">
+                            <Markdown>{scriptIdea}</Markdown>
+                          </div>
+                        </div>
+                      )}
+                      {voiceOnlyScript !== null && (
+                        <div className="mb-6 pb-6 border-b border-gray-100">
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between mb-3">
+                            <h3 className="font-bold text-gray-800">2. Script swoti</h3>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(voiceOnlyScript);
+                                  alert("T-copia script swoti!");
+                                }}
+                                className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
+                              >
+                                <Copy className="w-4 h-4 inline mr-1" />
+                                Copi
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void generateVoiceOnlyScript()}
+                                disabled={
+                                  isGenerating ||
+                                  !selectedProductId ||
+                                  !scriptIdea?.trim()
+                                }
+                                className="text-sm text-gray-700 border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                {isGenerating && generatingPhase === "voice" ? (
+                                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                                ) : (
+                                  <Sparkles className="w-4 h-4 shrink-0" />
+                                )}
+                                Generi merra khra
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500 mb-2">
+                            Éditi l-voix hna، dīr Step 3 (prompts) men ba3d Step 4 (script video).
+                          </p>
+                          <textarea
+                            className="w-full min-h-[180px] font-sans text-sm text-gray-800 bg-gray-50 p-4 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 outline-none resize-y"
+                            value={voiceOnlyScript}
+                            onChange={(e) => setVoiceOnlyScript(e.target.value)}
+                            placeholder="Script dial l-voix hna…"
+                            spellCheck={true}
+                          />
+                        </div>
+                      )}
+                      {visualPromptsText !== null && (
+                        <div className="mb-6 pb-6 border-b border-gray-100">
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between mb-3">
+                            <h3 className="font-bold text-gray-800">
+                              3. Prompts — model (prompt wa7ed, fiche 2×2) + background
+                            </h3>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(visualPromptsText);
+                                  alert("T-copia kolchi (markdown)!");
+                                }}
+                                className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
+                              >
+                                <Copy className="w-4 h-4 inline mr-1" />
+                                Copi kolchi
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void generateVisualPrompts()}
+                                disabled={
+                                  isGenerating ||
+                                  !selectedProductId ||
+                                  !voiceOnlyScript?.trim()
+                                }
+                                className="text-sm text-gray-700 border border-gray-200 hover:bg-gray-50 px-3 py-2 rounded-lg font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                {isGenerating && generatingPhase === "visuals" ? (
+                                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                                ) : (
+                                  <Sparkles className="w-4 h-4 shrink-0" />
+                                )}
+                                Generi merra khra
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500 mb-3">
+                            <strong>Model</strong>: fiche 4 druifat، tenue <strong>mzyana</strong>، fond byed studio،{" "}
+                            <strong>bla produit</strong> f yed. <strong>Background</strong>: pièce <strong>waqi3iya</strong>،{" "}
+                            <strong>machy</strong> m3ammra، <strong>machi</strong> fond byed، bla TikTok/ring light f
+                            prompt — <strong>bla</strong> bnadem، nafs blasa f ga3 l-machahid.
+                          </p>
+                          {modelImagePrompt != null && backgroundPromptOnly != null ? (
+                            <div className="space-y-4">
+                              <div className="rounded-xl border border-violet-100 bg-violet-50/30 p-3 space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-sm font-semibold text-gray-800">
+                                    Model — 1 prompt → 1 image m9soma 4
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(modelImagePrompt);
+                                      alert("T-copia prompt dial model!");
+                                    }}
+                                    className="text-xs text-orange-600 hover:text-orange-800 bg-orange-50 px-2.5 py-1.5 rounded-lg font-medium inline-flex items-center gap-1"
+                                  >
+                                    <Copy className="w-3.5 h-3.5 shrink-0" />
+                                    Copi
+                                  </button>
+                                </div>
+                                <textarea
+                                  className="w-full min-h-[200px] font-sans text-sm text-gray-800 bg-white p-3 rounded-lg border border-violet-100 focus:ring-2 focus:ring-violet-500 outline-none resize-y"
+                                  value={modelImagePrompt}
+                                  onChange={(e) => {
+                                    const m = e.target.value;
+                                    setModelImagePrompt(m);
+                                    setVisualPromptsText(
+                                      buildStep3VisualMarkdown(m, backgroundPromptOnly)
+                                    );
+                                  }}
+                                  spellCheck={true}
+                                />
+                              </div>
+                              <div className="rounded-xl border border-stone-200 bg-stone-50/80 p-3 space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-sm font-semibold text-gray-800">
+                                    Background (bla model)
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(backgroundPromptOnly);
+                                      alert("T-copia background!");
+                                    }}
+                                    className="text-xs text-orange-600 hover:text-orange-800 bg-orange-50 px-2.5 py-1.5 rounded-lg font-medium inline-flex items-center gap-1"
+                                  >
+                                    <Copy className="w-3.5 h-3.5 shrink-0" />
+                                    Copi
+                                  </button>
+                                </div>
+                                <textarea
+                                  className="w-full min-h-[120px] font-sans text-sm text-gray-800 bg-white p-3 rounded-lg border border-stone-200 focus:ring-2 focus:ring-stone-500 outline-none resize-y"
+                                  value={backgroundPromptOnly}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setBackgroundPromptOnly(v);
+                                    setVisualPromptsText(
+                                      buildStep3VisualMarkdown(modelImagePrompt, v)
+                                    );
+                                  }}
+                                  spellCheck={true}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-2">
+                                Format ma-t9rach — khass &quot;## Model&quot; o &quot;## Background&quot;
+                                — edith hna wla 3awd generi Step 3.
+                              </p>
+                              <textarea
+                                className="w-full min-h-[220px] font-sans text-sm text-gray-800 bg-violet-50/40 p-4 rounded-xl border border-violet-100 focus:ring-2 focus:ring-violet-500 outline-none resize-y"
+                                value={visualPromptsText}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  const again = parseStep3ModelBackground(v);
+                                  if (again) {
+                                    setModelImagePrompt(again.model);
+                                    setBackgroundPromptOnly(again.background);
+                                    setVisualPromptsText(
+                                      buildStep3VisualMarkdown(again.model, again.background)
+                                    );
+                                  } else {
+                                    setVisualPromptsText(v);
+                                    setModelImagePrompt(null);
+                                    setBackgroundPromptOnly(null);
+                                  }
+                                }}
+                                placeholder="## Model … (prompt wa7ed) … ## Background …"
+                                spellCheck={true}
+                              />
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {generatedScript && (
+                        <>
                       <div className="space-y-3 pb-6 mb-6 border-b border-gray-100">
                         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
                           Tsawer l-Webhook (khtiyari) — zidhom men ba3d ma y-tgenera script
@@ -2910,7 +3933,7 @@ export default function App() {
                             onClick={() => setIsScriptCollapsed(!isScriptCollapsed)}
                             className="flex items-center gap-2 hover:bg-gray-50 px-2 py-1 rounded-lg transition-colors self-start"
                           >
-                            <h3 className="font-bold text-gray-800 text-lg sm:text-xl">Script</h3>
+                            <h3 className="font-bold text-gray-800 text-lg sm:text-xl">4. Script video (kamal)</h3>
                             {isScriptCollapsed ? <ChevronDown className="w-5 h-5 text-gray-500" /> : <ChevronUp className="w-5 h-5 text-gray-500" />}
                           </button>
                           <button 
@@ -2930,11 +3953,13 @@ export default function App() {
                           </div>
                         )}
                       </div>
+                        </>
+                      )}
                     </div>
                   ) : (
                     <div className="h-full flex flex-col items-center justify-center text-gray-400 text-center">
                       <PenTool className="w-12 h-12 mb-2 opacity-20" />
-                      <p>Khtar produit o click 3la "Generi Script" bach t-chouf natija hna.</p>
+                      <p>Khtar produit o dīr Step 1 (l-Fikra) bach t-bda.</p>
                     </div>
                   )}
                 </div>
@@ -3648,6 +4673,137 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {activeTab === "settings" && (
+          <div className="max-w-2xl mx-auto space-y-8 pb-12">
+            <div className="flex items-start gap-3">
+              <div className="bg-orange-100 p-2 rounded-xl shrink-0">
+                <Settings className="w-6 h-6 text-orange-600" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold">I3dadat</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Zid lmots li Veo ma-kaybefore-homch, khtar lougha d script swoti. Lougha o liste
+                  Veo: sauvegarde automatique f navigateur. Webhooks: &quot;Sauvegarder&quot; b-compte
+                  dialk f Supabase.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 space-y-4">
+              <h3 className="font-semibold text-gray-800">Webhooks (Make.com)</h3>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Webhook URL — script / video
+                </label>
+                <input
+                  type="url"
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+                  value={webhookUrl}
+                  onChange={(e) => setWebhookUrl(e.target.value)}
+                  placeholder="https://hook.eu1.make.com/..."
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  POST dial l-script mnin y-tgenera (kamel).
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Webhook URL — tsawer (scenes)
+                </label>
+                <input
+                  type="url"
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+                  value={imagesWebhookUrl}
+                  onChange={(e) => setImagesWebhookUrl(e.target.value)}
+                  placeholder="https://hook.eu1.make.com/..."
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  POST dial prompts / tsawer dyal l-machahid.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingWebhookSettings}
+                onClick={() => void saveWebhookSettings()}
+                className="w-full sm:w-auto px-6 py-3 bg-orange-500 text-white rounded-xl font-semibold hover:bg-orange-600 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isSavingWebhookSettings ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : null}
+                Sauvegarder webhooks
+              </button>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 space-y-4">
+              <h3 className="font-semibold text-gray-800">Lougha o Veo</h3>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                  Lougha d script swoti
+                </label>
+                <VoiceLanguageSelect
+                  value={voiceScriptLanguage}
+                  onChange={setVoiceScriptLanguage}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                  Kalma / mots ma-yt accepted-iwch f Veo 3
+                </label>
+                <textarea
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none resize-y min-h-[100px] text-base sm:text-sm"
+                  placeholder="Khelli line w7da l kol kelma, ola comma / virgule"
+                  value={veoAvoidWords}
+                  onChange={(e) => setVeoAvoidWords(e.target.value)}
+                />
+                <p className="mt-2 text-xs text-gray-500">
+                  L-AI k-yjannb had lmots f script & texte. Tashkīl 3la l-kelmāt s3iba
+                  f 3arabi kay-dkhul f prompts dial generi.
+                </p>
+              </div>
+              <div className="pt-2 border-t border-gray-100">
+                <p className="text-sm text-gray-700 mb-2">
+                  Historique dial Step 3 (model + background) f had n-navigateur:{" "}
+                  <span className="font-medium tabular-nums">{usedStep3VisualCount}</span>{" "}
+                  generasyon m-sauvegardyin bach ma-yt3awd-ch nafs prompts.
+                </p>
+                <button
+                  type="button"
+                  className="text-sm text-gray-700 border border-gray-200 hover:bg-gray-50 px-4 py-2 rounded-xl font-medium"
+                  onClick={() => {
+                    saveUsedVisualPrompts({ models: [], backgrounds: [] });
+                    setVisualPromptHistoryTick((t) => t + 1);
+                    alert("Tfaret l-historique dial prompts (model + background).");
+                  }}
+                >
+                  Fergh historique dial prompts (Step 3)
+                </button>
+              </div>
+              <div className="pt-2 border-t border-gray-100">
+                <p className="text-sm text-gray-700 mb-2">
+                  Draft dial onglet Generate (fikra, voix, prompts, script…): sauvegarde
+                  automatique f navigateur — refresh ma-kaymsa7-ch l-khedma.
+                </p>
+                <button
+                  type="button"
+                  className="text-sm text-red-700 border border-red-200 hover:bg-red-50 px-4 py-2 rounded-xl font-medium"
+                  onClick={() => {
+                    if (
+                      !confirm(
+                        "Fergh draft dial Generate (local) w refresh l-page? Ma-t9derch t-3awd-h.",
+                      )
+                    )
+                      return;
+                    clearWorkspaceDraft();
+                    window.location.reload();
+                  }}
+                >
+                  Fergh draft Generate + refresh
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
       {/* Missing Images Dialog Modal */}
       {missingImagesDialog && (
@@ -3940,125 +5096,13 @@ export default function App() {
             </div>
             {!webhookUrl && (
               <p className="text-xs text-red-500 text-center">
-                Khassk t-zid l-webhook URL f l-i3dadat (Settings) 9bel ma tsifet.
+                Khassk t-zid l-webhook URL f onglet I3dadat 9bel ma tsifet.
               </p>
             )}
           </div>
         </div>
       )}
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4">
-            <h3 className="text-xl font-bold flex items-center gap-2">
-              <Settings className="w-5 h-5 text-gray-500" />
-              Settings (I3dadat)
-            </h3>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Webhook URL (Make.com)</label>
-                <input 
-                  type="url" 
-                  className="w-full px-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
-                  value={webhookUrl}
-                  onChange={e => setWebhookUrl(e.target.value)}
-                  placeholder="https://hook.eu1.make.com/..."
-                />
-                <p className="text-xs text-gray-500 mt-2">
-                  Had l-URL ghadi n-sifto lih l-script mnin y-tgenera (POST request).
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Images Webhook URL (Make.com)</label>
-                <input 
-                  type="url" 
-                  className="w-full px-4 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
-                  value={imagesWebhookUrl}
-                  onChange={e => setImagesWebhookUrl(e.target.value)}
-                  placeholder="https://hook.eu1.make.com/..."
-                />
-                <p className="text-xs text-gray-500 mt-2">
-                  Had l-URL ghadi n-sifto lih tsawer dyal kol scene m3a script (POST request).
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 space-y-2">
-                <p className="text-xs font-semibold text-amber-900">
-                  TEMP — Sauvegard dakchi li local f Supabase
-                </p>
-                <p className="text-[11px] text-amber-800/90">
-                  Kat-sauvegard f Supabase: webhooks, scene images, <strong>produits + videos</strong> li f
-                  localforage (mirror mn a7san chargement) w videos li f queue (ila insert fchlat). 7yed
-                  mlli tsali.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void syncLocalDataToSupabase()}
-                  disabled={isMigratingLocal || !user}
-                  className="w-full py-2.5 text-sm font-semibold rounded-xl bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {isMigratingLocal ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Upload className="w-4 h-4" />
-                  )}
-                  {isMigratingLocal ? "Kan-sauvegardiw..." : "Sync local → Supabase"}
-                </button>
-              </div>
-            </div>
-            <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
-              <button 
-                onClick={() => setShowSettings(false)}
-                className="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded-xl font-medium transition-colors"
-              >
-                Lghi
-              </button>
-              <button 
-                type="button"
-                onClick={() => {
-                  void (async () => {
-                    const mk = webhookUrl.trim();
-                    const im = imagesWebhookUrl.trim();
-                    try {
-                      localStorage.setItem("makeWebhookUrl", mk);
-                      localStorage.setItem("imagesWebhookUrl", im);
-                    } catch {
-                      /* ignore */
-                    }
-                    if (!user) {
-                      setShowSettings(false);
-                      alert(
-                        "Settings m-sauvegarder (localStorage). Dkhol b-compte bach t-sauvegard f Supabase."
-                      );
-                      return;
-                    }
-                    const { error } = await supabase.from("user_app_settings").upsert(
-                      {
-                        owner_id: user.id,
-                        make_webhook_url: mk,
-                        images_webhook_url: im,
-                        updated_at: new Date().toISOString(),
-                      },
-                      { onConflict: "owner_id" }
-                    );
-                    if (error) {
-                      alert(formatDbErrorForLog(error));
-                      return;
-                    }
-                    setShowSettings(false);
-                    alert("Settings m-sauvegarder f Supabase + local.");
-                  })();
-                }}
-                className="px-4 py-2 bg-orange-500 text-white rounded-xl font-medium hover:bg-orange-600 transition-colors"
-              >
-                Sauvegarder
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
