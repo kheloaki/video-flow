@@ -2432,11 +2432,10 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
     if (!webhookUrl || !generatedScript || generatedScript === "Smah lina, ma9dernach n-generiw script.") return;
     if (!user) return;
 
-    const missingImages: string[] = [];
-    if (useModelRef && !modelImageUrl) missingImages.push("Tswira d l-Model");
-    if (useProductRef && !productImageUrl) missingImages.push("Tswira d l-Produit");
-    if (useBackgroundRef && !backgroundImageUrl) missingImages.push("Tswira d l-Background");
-    if (showMissingImagesDialog(missingImages)) return;
+    // Reference images are optional in the UI; draft flags can be stale. Send refs only when URLs exist.
+    const payloadUseModelRef = !!modelImageUrl;
+    const payloadUseProductRef = !!productImageUrl;
+    const payloadUseBackgroundRef = !!backgroundImageUrl;
 
     setIsSendingWebhook(true);
     setWebhookStatus("idle");
@@ -2476,12 +2475,12 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
           modelPrompt: step3Parsed?.model ?? "",
           backgroundPrompt: step3Parsed?.background ?? "",
           scenes: generatedScenes ? generatedScenes.map((s) => JSON.stringify(s)).join(", ") : "",
-          modelImageUrl,
-          productImageUrl,
-          backgroundImageUrl,
-          useModelRef,
-          useProductRef,
-          useBackgroundRef,
+          modelImageUrl: modelImageUrl ?? null,
+          productImageUrl: productImageUrl ?? null,
+          backgroundImageUrl: backgroundImageUrl ?? null,
+          useModelRef: payloadUseModelRef,
+          useProductRef: payloadUseProductRef,
+          useBackgroundRef: payloadUseBackgroundRef,
           timestamp: new Date().toISOString(),
           videoId: webhookVideoId,
         }),
