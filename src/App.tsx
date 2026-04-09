@@ -271,12 +271,61 @@ function supabaseErrorMessage(err: { message?: string; code?: string } | null): 
 
 type ModelGender = "any" | "woman" | "man";
 type ModelAge = "any" | "young" | "aged";
-type VoiceScriptLanguage = "darija" | "darija_french" | "french" | "msa";
+type VoiceScriptLanguage =
+  | "darija"
+  | "darija_french"
+  | "french"
+  | "msa"
+  | "english"
+  | "spanish"
+  | "portuguese"
+  | "swahili"
+  | "hausa"
+  | "amharic"
+  | "yoruba"
+  | "zulu"
+  | "other";
 
-function voiceLanguagePromptBlock(lang: VoiceScriptLanguage): string {
+type VoiceAccent =
+  | "neutral"
+  | "moroccan"
+  | "tanzanian"
+  | "kenyan"
+  | "nigerian"
+  | "ghanaian"
+  | "south_african"
+  | "ethiopian"
+  | "other";
+
+function resolveVoiceLanguageLabel(lang: VoiceScriptLanguage, other: string | null | undefined) {
+  if (lang !== "other") return lang;
+  const t = (other ?? "").trim();
+  return t || "english";
+}
+
+function resolveVoiceAccentLabel(accent: VoiceAccent, other: string | null | undefined) {
+  if (accent !== "other") return accent;
+  const t = (other ?? "").trim();
+  return t || "neutral";
+}
+
+function voiceLanguagePromptBlock(args: {
+  lang: VoiceScriptLanguage;
+  langOther: string;
+  accent: VoiceAccent;
+  accentOther: string;
+}): string {
+  const lang = args.lang;
+  const langLabel = resolveVoiceLanguageLabel(lang, args.langOther);
+  const accentLabel = resolveVoiceAccentLabel(args.accent, args.accentOther);
+  const accentBlock = `VOICE ACCENT / DIALECT TARGET: ${accentLabel}.
+- Keep it natural and easy to pronounce (no forced “caricature” spelling).
+- Let the accent show in word choice, rhythm, and common phrases more than weird spelling tricks.`;
+
   switch (lang) {
     case "darija":
       return `VOICE LANGUAGE: Moroccan Darija (الدارجة المغربية) for ALL spoken lines — same colloquial level from the first word to the last.
+${accentBlock}
 
 PRONUNCIATION — CRITICAL (Darija): Make every line easy to say out loud on camera or with TTS.
 - The “Style Examples” in the prompt may be transcriptions in MSA, mixed Arabic, or older ad copy — treat them ONLY as rhythm, energy, and structure hints. NEVER copy their formal Arabic phrasing or vocabulary into your output; translate the same ideas into real spoken Darija (كي…، غادي، دابا، شنو، واش، بزاف، مزيان، شري، دير، شوف، راه… style), not classroom Arabic.
@@ -288,16 +337,36 @@ PRONUNCIATION — CRITICAL (Darija): Make every line easy to say out loud on cam
 - Brand/product names: keep official spelling if required, but keep surrounding wording plain and natural to say.`;
     case "darija_french":
       return `VOICE LANGUAGE: Natural Moroccan code-switching — Darija with French where people really use it in TikTok ads and daily talk.
+${accentBlock}
 Keep both languages easy to pronounce: no ornate or rare French, no heavy فصحى in Darija stretches.
 - Style examples may be in MSA or formal Arabic — do NOT mirror that register in the Darija parts; keep Darija colloquial even when you borrow hook structure from examples.
 - Do not mix a formal Arabic intro (fully vocalized or MSA-style) with colloquial body — keep one consistent spoken register.
 - If Arabic script appears, it must be Darija-style wording, not formal marketing Arabic.`;
     case "french":
-      return `VOICE LANGUAGE: French for all spoken lines — natural, clear spoken French suited to Moroccan social/TikTok ads (avoid stiff admin-style French).`;
+      return `VOICE LANGUAGE: French for all spoken lines — natural, clear spoken French suited to short social ads (avoid stiff admin-style French).
+${accentBlock}`;
     case "msa":
-      return `VOICE LANGUAGE: Modern Standard Arabic (العربية الفصحى) for all spoken lines — clear and sayable for short video (avoid archaic or overly poetic wording).`;
+      return `VOICE LANGUAGE: Modern Standard Arabic (العربية الفصحى) for all spoken lines — clear and sayable for short video (avoid archaic or overly poetic wording).
+${accentBlock}`;
+    case "english":
+    case "spanish":
+    case "portuguese":
+    case "swahili":
+    case "hausa":
+    case "amharic":
+    case "yoruba":
+    case "zulu":
+    case "other":
+      return `VOICE LANGUAGE: ${langLabel} for ALL spoken lines.
+${accentBlock}
+PRONUNCIATION — CRITICAL: Keep the voiceover simple, natural, and easy to read out loud. Avoid rare words, tongue-twisters, and very long sentences.`;
     default:
-      return voiceLanguagePromptBlock("darija");
+      return voiceLanguagePromptBlock({
+        lang: "darija",
+        langOther: "",
+        accent: "moroccan",
+        accentOther: "",
+      });
   }
 }
 
@@ -324,6 +393,16 @@ function tashkeelAndOrthographyBlock(lang: VoiceScriptLanguage): string {
       return ORTHOGRAPHY_FRENCH_ONLY;
     case "msa":
       return TASHKEEL_INSTRUCTIONS_MSA;
+    case "english":
+    case "spanish":
+    case "portuguese":
+    case "swahili":
+    case "hausa":
+    case "amharic":
+    case "yoruba":
+    case "zulu":
+    case "other":
+      return `SCRIPT LOOK: Write in the normal script for the chosen language (usually Latin). Keep it easy to read and pronounce; avoid heavy diacritics unless the language normally requires them.`;
     default:
       return ORTHOGRAPHY_DARIJA_ARABIC_SCRIPT;
   }
@@ -626,15 +705,24 @@ const SCRIPT_PREFS_LS_KEY = "darijaScriptAi.scriptPrefs";
 
 type StoredScriptPrefs = {
   voiceScriptLanguage?: string;
+  voiceScriptLanguageOther?: string;
+  voiceAccent?: string;
+  voiceAccentOther?: string;
   veoAvoidWords?: string;
 };
 
 function loadScriptPrefsFromLS(): {
   voiceScriptLanguage: VoiceScriptLanguage;
+  voiceScriptLanguageOther: string;
+  voiceAccent: VoiceAccent;
+  voiceAccentOther: string;
   veoAvoidWords: string;
 } {
   const fallback = {
     voiceScriptLanguage: "darija" as VoiceScriptLanguage,
+    voiceScriptLanguageOther: "",
+    voiceAccent: "moroccan" as VoiceAccent,
+    voiceAccentOther: "",
     veoAvoidWords: "",
   };
   if (typeof window === "undefined") return fallback;
@@ -642,14 +730,56 @@ function loadScriptPrefsFromLS(): {
     const raw = localStorage.getItem(SCRIPT_PREFS_LS_KEY);
     if (!raw) return fallback;
     const j = JSON.parse(raw) as StoredScriptPrefs;
-    const langRaw = j.voiceScriptLanguage;
+    const langRaw = String(j.voiceScriptLanguage ?? "").trim();
     const voiceScriptLanguage = (
-      ["darija", "darija_french", "french", "msa"].includes(String(langRaw))
-        ? langRaw
+      [
+        "darija",
+        "darija_french",
+        "french",
+        "msa",
+        "english",
+        "spanish",
+        "portuguese",
+        "swahili",
+        "hausa",
+        "amharic",
+        "yoruba",
+        "zulu",
+        "other",
+      ].includes(langRaw)
+        ? (langRaw as VoiceScriptLanguage)
         : fallback.voiceScriptLanguage
     ) as VoiceScriptLanguage;
+
+    const voiceScriptLanguageOther =
+      typeof j.voiceScriptLanguageOther === "string" ? j.voiceScriptLanguageOther : "";
+
+    const accentRaw = String(j.voiceAccent ?? "").trim();
+    const voiceAccent = (
+      [
+        "neutral",
+        "moroccan",
+        "tanzanian",
+        "kenyan",
+        "nigerian",
+        "ghanaian",
+        "south_african",
+        "ethiopian",
+        "other",
+      ].includes(accentRaw)
+        ? (accentRaw as VoiceAccent)
+        : fallback.voiceAccent
+    ) as VoiceAccent;
+
+    const voiceAccentOther = typeof j.voiceAccentOther === "string" ? j.voiceAccentOther : "";
     const veoAvoidWords = typeof j.veoAvoidWords === "string" ? j.veoAvoidWords : "";
-    return { voiceScriptLanguage, veoAvoidWords };
+    return {
+      voiceScriptLanguage,
+      voiceScriptLanguageOther,
+      voiceAccent,
+      voiceAccentOther,
+      veoAvoidWords,
+    };
   } catch {
     return fallback;
   }
@@ -666,23 +796,86 @@ function truncateForStyleContext(s: string, max: number): string {
 function VoiceLanguageSelect(props: {
   value: VoiceScriptLanguage;
   onChange: (v: VoiceScriptLanguage) => void;
+  otherValue: string;
+  onChangeOther: (v: string) => void;
+  accentValue: VoiceAccent;
+  onChangeAccent: (v: VoiceAccent) => void;
+  accentOtherValue: string;
+  onChangeAccentOther: (v: string) => void;
   id?: string;
 }) {
-  const { value, onChange, id } = props;
+  const {
+    value,
+    onChange,
+    otherValue,
+    onChangeOther,
+    accentValue,
+    onChangeAccent,
+    accentOtherValue,
+    onChangeAccentOther,
+    id,
+  } = props;
   return (
-    <select
-      id={id}
-      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
-      value={value}
-      onChange={(e) => onChange(e.target.value as VoiceScriptLanguage)}
-    >
-      <option value="darija">
-        Darija — kelmāt sāḥla (sahəl l‑tape o TTS)
-      </option>
-      <option value="darija_french">Darija + Fransi (mchakhatt)</option>
-      <option value="french">Français</option>
-      <option value="msa">العربية الفصحى (MSA)</option>
-    </select>
+    <div className="space-y-2">
+      <select
+        id={id}
+        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+        value={value}
+        onChange={(e) => onChange(e.target.value as VoiceScriptLanguage)}
+      >
+        <option value="darija">Darija (Morocco)</option>
+        <option value="darija_french">Darija + Français (code-switch)</option>
+        <option value="french">Français</option>
+        <option value="msa">العربية الفصحى (MSA)</option>
+        <option value="english">English</option>
+        <option value="spanish">Español</option>
+        <option value="portuguese">Português</option>
+        <option value="swahili">Swahili</option>
+        <option value="hausa">Hausa</option>
+        <option value="amharic">Amharic</option>
+        <option value="yoruba">Yorùbá</option>
+        <option value="zulu">Zulu</option>
+        <option value="other">Other (write it)</option>
+      </select>
+
+      {value === "other" && (
+        <input
+          className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+          value={otherValue}
+          onChange={(e) => onChangeOther(e.target.value)}
+          placeholder="Language name (e.g. Italian, Turkish, Arabic Egyptian, …)"
+        />
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <select
+          className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+          value={accentValue}
+          onChange={(e) => onChangeAccent(e.target.value as VoiceAccent)}
+        >
+          <option value="moroccan">Accent: Moroccan</option>
+          <option value="neutral">Accent: Neutral</option>
+          <option value="tanzanian">Accent: Tanzanian</option>
+          <option value="kenyan">Accent: Kenyan</option>
+          <option value="nigerian">Accent: Nigerian</option>
+          <option value="ghanaian">Accent: Ghanaian</option>
+          <option value="south_african">Accent: South African</option>
+          <option value="ethiopian">Accent: Ethiopian</option>
+          <option value="other">Accent: Other (write it)</option>
+        </select>
+
+        {accentValue === "other" ? (
+          <input
+            className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none"
+            value={accentOtherValue}
+            onChange={(e) => onChangeAccentOther(e.target.value)}
+            placeholder="Accent / dialect (e.g. Egyptian, Algerian, Cape Town, …)"
+          />
+        ) : (
+          <div className="hidden sm:block" />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -888,6 +1081,13 @@ export default function App() {
   const [voiceScriptLanguage, setVoiceScriptLanguage] = useState<VoiceScriptLanguage>(() =>
     loadScriptPrefsFromLS().voiceScriptLanguage
   );
+  const [voiceScriptLanguageOther, setVoiceScriptLanguageOther] = useState(() =>
+    loadScriptPrefsFromLS().voiceScriptLanguageOther
+  );
+  const [voiceAccent, setVoiceAccent] = useState<VoiceAccent>(() => loadScriptPrefsFromLS().voiceAccent);
+  const [voiceAccentOther, setVoiceAccentOther] = useState(() =>
+    loadScriptPrefsFromLS().voiceAccentOther
+  );
   const [sceneCount, setSceneCount] = useState(() => workspaceDraft?.sceneCount ?? "5");
   const [modelGender, setModelGender] = useState<ModelGender>(
     () => workspaceDraft?.modelGender ?? "any"
@@ -1027,13 +1227,16 @@ export default function App() {
         SCRIPT_PREFS_LS_KEY,
         JSON.stringify({
           voiceScriptLanguage,
+          voiceScriptLanguageOther,
+          voiceAccent,
+          voiceAccentOther,
           veoAvoidWords,
         })
       );
     } catch {
       /* ignore */
     }
-  }, [voiceScriptLanguage, veoAvoidWords]);
+  }, [voiceScriptLanguage, voiceScriptLanguageOther, voiceAccent, voiceAccentOther, veoAvoidWords]);
 
   const [copied, setCopied] = useState(false);
   /** Set when Supabase list queries fail — otherwise the UI looks “empty” with no explanation */
@@ -1593,6 +1796,7 @@ export default function App() {
     videoTimingBlock: string;
     arabicDurationLine: string;
     styleInstruction: string;
+    castingBlock: string;
     voiceLanguageBlock: string;
     tashkeelBlock: string;
     veoAvoidBlock: string;
@@ -1674,6 +1878,11 @@ export default function App() {
       ? "FORBIDDEN WORDS above apply to every NEW line you write (Text on Screen, visual descriptions, extra tips). The [النص الصوتي - Voice Script] lines in each scene and the 🎙️ Full Voice Script block MUST stay character-identical to the LOCKED VOICE SCRIPT — edit Step 2 if a banned term appears there."
       : "";
 
+    const castingBlock =
+      modelGender === "any" && modelAge === "any"
+        ? "CASTING / ON-CAMERA TALENT: Any (creator-style, natural)."
+        : `CASTING / ON-CAMERA TALENT: gender=${modelGender}, age vibe=${modelAge}.`;
+
     return {
       productInfo,
       context,
@@ -1684,7 +1893,13 @@ export default function App() {
       videoTimingBlock,
       arabicDurationLine,
       styleInstruction,
-      voiceLanguageBlock: voiceLanguagePromptBlock(voiceScriptLanguage),
+      castingBlock,
+      voiceLanguageBlock: voiceLanguagePromptBlock({
+        lang: voiceScriptLanguage,
+        langOther: voiceScriptLanguageOther,
+        accent: voiceAccent,
+        accentOther: voiceAccentOther,
+      }),
       tashkeelBlock: tashkeelAndOrthographyBlock(voiceScriptLanguage),
       veoAvoidBlock,
       veoLockedVoiceNote,
@@ -1777,6 +1992,8 @@ Propose a sharp ad concept (not the final voiceover yet).
 
 ${b.voiceLanguageBlock}
 
+${b.castingBlock}
+
 Write the creative substance in the same language family as the VOICE LANGUAGE above (concept beats, hook angle, emotional arc, CTA direction). You may keep these section titles in Arabic with markdown **bold** exactly as listed:
 
 Product Info: Name and Description
@@ -1839,6 +2056,8 @@ Required sections (fill under each title, be concise — strategy only, no scene
       const prompt = `You are an expert Moroccan TikTok voiceover writer. Output ONLY spoken words for the full ad.
 
 ${b.voiceLanguageBlock}
+
+${b.castingBlock}
 
 Product Info: Name and Description
 ${b.productInfo}
@@ -1907,6 +2126,8 @@ TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly follo
       const prompt = `You are an expert prompt engineer for AI image and video tools (Veo, reference images, b-roll generators) for Moroccan TikTok / UGC-style ads.
 
 ${b.voiceLanguageBlock}
+
+${b.castingBlock}
 
 Product Info: Name and Description
 ${b.productInfo}
@@ -2004,6 +2225,8 @@ Write the full video ad breakdown (scenes, visuals, on-screen text, delivery tip
 VISUAL ALIGNMENT — Use the LOCKED VISUAL PROMPTS below when writing [شنو تبيني فالفيديو] and any camera/setting notes: (1) Model = quadrants reference — white seamless, talent-only, styled outfit, NO product in hands. (2) Background = ONE simple real interior for the WHOLE video (sparse, not busy; not a white void studio) — SAME room every scene; do NOT change location between scenes unless the creative idea has one explicit exception. Stay consistent.
 
 ${b.voiceLanguageBlock}
+
+${b.castingBlock}
 
 Product Info: Name and Description
 ${b.productInfo}
@@ -3418,18 +3641,14 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
                     <VoiceLanguageSelect
                       value={voiceScriptLanguage}
                       onChange={setVoiceScriptLanguage}
+                      otherValue={voiceScriptLanguageOther}
+                      onChangeOther={setVoiceScriptLanguageOther}
+                      accentValue={voiceAccent}
+                      onChangeAccent={setVoiceAccent}
+                      accentOtherValue={voiceAccentOther}
+                      onChangeAccentOther={setVoiceAccentOther}
                     />
-                    <p className="mt-1 text-xs text-gray-500">
-                      T9der t-beddel aydan f &quot;I3dadat&quot;. L-exemples jayin men videos dial
-                      produit + scripts li sauvegardit f &quot;Sauvegardés&quot; (nafs produit wla
-                      ga3).
-                    </p>
                   </div>
-                  <p className="text-xs text-gray-500 -mt-1">
-                    B Darija: script b-7roof 3arabiya derya (bla تشكيل على كلم كلم). L-fuṣḥa w
-                    l-jmal li kaybanno bhal l-ktob ma-ykounouch m7ebbin. F MSA: tashkīl 3la
-                    l-kelmāt s3iba. (&quot;I3dadat&quot; → mots Veo.)
-                  </p>
 
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Ch7al mn machhad (Scenes)?</label>
@@ -3448,9 +3667,6 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
                       <option value="9">9 Machahid</option>
                       <option value="10">10 Machahid</option>
                     </select>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Koll machhad = 8 thaniya ({parseSceneCountForVideo(sceneCount) * SECONDS_PER_SCENE}s total).
-                    </p>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -3501,14 +3717,6 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
                     </div>
                   )}
 
-                  <p className="text-xs text-gray-500">
-                    Kammel 4 d l-marati: l-fikra → script swoti → prompts (model prompt wa7ed fiche 2×2 +
-                    background bla model) → script video (kamal).
-                  </p>
-                  <p className="text-xs text-emerald-700/90">
-                    L-khedma hna kat-tsajjal f navigateur: refresh ma-kaymsa7-ch l-fikra w scripts
-                    (I3dadat → fergh draft ila bghiti t-beddi men sifr).
-                  </p>
                   <button
                     type="button"
                     onClick={generateScriptIdea}
@@ -4743,6 +4951,12 @@ ${b.context || "Standard high-energy Moroccan TikTok slang."}`;
                 <VoiceLanguageSelect
                   value={voiceScriptLanguage}
                   onChange={setVoiceScriptLanguage}
+                  otherValue={voiceScriptLanguageOther}
+                  onChangeOther={setVoiceScriptLanguageOther}
+                  accentValue={voiceAccent}
+                  onChangeAccent={setVoiceAccent}
+                  accentOtherValue={voiceAccentOther}
+                  onChangeAccentOther={setVoiceAccentOther}
                 />
               </div>
               <div>
