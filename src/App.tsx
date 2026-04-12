@@ -2705,6 +2705,10 @@ ${b.styleExamplesBlock}`;
     setIsSendingImages(true);
 
     try {
+      const refUseModel = !!modelImageUrl;
+      const refUseProduct = !!productImageUrl;
+      const refUseBackground = !!backgroundImageUrl;
+
       const scenesPayload = parsedScenes.map((scene: any, idx: number) => ({
         sceneNumber: scene.sceneNumber || scene.scene_number || (idx + 1),
         debut_image_url: sceneImages[`${selectedHistoryId}-${idx}-debut`] || null,
@@ -2716,6 +2720,13 @@ ${b.styleExamplesBlock}`;
       const payload = {
         script: webhookResponseData.script || generatedScript,
         scenes: scenesPayload,
+        /** Same reference URLs as main video webhook — public links for Veo / image refs */
+        modelImageUrl: modelImageUrl ?? null,
+        productImageUrl: productImageUrl ?? null,
+        backgroundImageUrl: backgroundImageUrl ?? null,
+        useModelRef: refUseModel,
+        useProductRef: refUseProduct,
+        useBackgroundRef: refUseBackground,
         timestamp: new Date().toISOString(),
         videoId: videoPageDisplayId(selectedHistoryId),
       };
