@@ -297,16 +297,117 @@ type VoiceAccent =
   | "ethiopian"
   | "other";
 
-function resolveVoiceLanguageLabel(lang: VoiceScriptLanguage, other: string | null | undefined) {
-  if (lang !== "other") return lang;
-  const t = (other ?? "").trim();
-  return t || "english";
+/** Human-readable value injected into prompts as SCRIPT_LANGUAGE. */
+function voiceLanguageDisplayForPrompt(lang: VoiceScriptLanguage, langOther: string): string {
+  const o = langOther.trim();
+  switch (lang) {
+    case "darija":
+      return "Moroccan Darija (الدارجة المغربية)";
+    case "darija_french":
+      return "Moroccan Darija + French (natural code-switching)";
+    case "french":
+      return "French";
+    case "msa":
+      return "Modern Standard Arabic (MSA / الفصحى)";
+    case "english":
+      return "English";
+    case "spanish":
+      return "Spanish";
+    case "portuguese":
+      return "Portuguese";
+    case "swahili":
+      return "Swahili";
+    case "hausa":
+      return "Hausa";
+    case "amharic":
+      return "Amharic";
+    case "yoruba":
+      return "Yorùbá";
+    case "zulu":
+      return "Zulu";
+    case "other":
+      return o || "Other (unspecified — use clear, simple English)";
+    default:
+      return "Moroccan Darija (الدارجة المغربية)";
+  }
 }
 
-function resolveVoiceAccentLabel(accent: VoiceAccent, other: string | null | undefined) {
-  if (accent !== "other") return accent;
-  const t = (other ?? "").trim();
-  return t || "neutral";
+/** Human-readable value injected into prompts as SCRIPT_ACCENT. */
+function voiceAccentDisplayForPrompt(accent: VoiceAccent, accentOther: string): string {
+  const o = accentOther.trim();
+  switch (accent) {
+    case "neutral":
+      return "Neutral / international";
+    case "moroccan":
+      return "Moroccan";
+    case "tanzanian":
+      return "Tanzanian";
+    case "kenyan":
+      return "Kenyan";
+    case "nigerian":
+      return "Nigerian";
+    case "ghanaian":
+      return "Ghanaian";
+    case "south_african":
+      return "South African";
+    case "ethiopian":
+      return "Ethiopian";
+    case "other":
+      return o || "Custom (match SCRIPT_LANGUAGE register)";
+    default:
+      return "Moroccan";
+  }
+}
+
+/** Named variables every generation prompt must respect (language + accent). */
+function scriptLanguageAccentVariablesBlock(args: {
+  lang: VoiceScriptLanguage;
+  langOther: string;
+  accent: VoiceAccent;
+  accentOther: string;
+}): string {
+  const LANGUAGE = voiceLanguageDisplayForPrompt(args.lang, args.langOther);
+  const ACCENT = voiceAccentDisplayForPrompt(args.accent, args.accentOther);
+  return `=== SCRIPT OUTPUT VARIABLES (fixed for this request) ===
+SCRIPT_LANGUAGE: ${LANGUAGE}
+SCRIPT_ACCENT: ${ACCENT}
+
+BINDING RULES:
+- All spoken dialogue, hooks, CTAs, and quoted on-screen spoken lines MUST match SCRIPT_LANGUAGE.
+- SCRIPT_ACCENT shapes delivery: rhythm, local phrasing, and word choice where it still fits SCRIPT_LANGUAGE — natural and easy to pronounce (no caricature spelling).
+- Do not switch language mid-script unless SCRIPT_LANGUAGE is explicitly "Darija + French" code-switching.
+- If SCRIPT_LANGUAGE is French or English but SCRIPT_ACCENT is Moroccan (or another region), use that region’s real spoken flavor in that language (e.g. Moroccan French phrasing), not a different language.
+===`;
+}
+
+function generationExpertRole(phase: "idea" | "voice" | "visuals" | "video"): string {
+  const core =
+    "You are an expert short-form social ad creative (TikTok / Reels / UGC). Always obey SCRIPT_LANGUAGE and SCRIPT_ACCENT from the block below — they override any default examples.";
+  switch (phase) {
+    case "idea":
+      return `${core}\nPropose a sharp ad concept (not the final voiceover yet).`;
+    case "voice":
+      return `${core}\nOutput ONLY spoken words for the full ad.`;
+    case "visuals":
+      return `${core}\nYou write image prompts for reference stills (model sheet + background plate).`;
+    case "video":
+      return `${core}\nYou write the full on-screen / scene breakdown while locking spoken lines verbatim.`;
+  }
+}
+
+function styleExamplesFallbackForPrompt(): string {
+  return "No style examples loaded for this selection — invent fresh pacing and hooks that still match SCRIPT_LANGUAGE + SCRIPT_ACCENT (creator-realistic, easy to pronounce).";
+}
+
+function videoBreakdownStructureNote(lang: VoiceScriptLanguage): string {
+  if (lang === "darija" || lang === "darija_french" || lang === "msa") {
+    return "Use Arabic / Darija-friendly labels and structure in the template below (headings, stage directions, bracket tags). Spoken lines inside [النص الصوتي - Voice Script] must stay verbatim from the LOCKED VOICE SCRIPT (SCRIPT_LANGUAGE).";
+  }
+  return "Keep the template’s Arabic/Darija section titles and bracket labels exactly as given (layout consistency). Spoken lines inside [النص الصوتي - Voice Script] must stay verbatim from the LOCKED VOICE SCRIPT (SCRIPT_LANGUAGE + SCRIPT_ACCENT delivery).";
+}
+
+function onCameraModelLookFromAccentBlock(): string {
+  return `ON-CAMERA MODEL LOOK (2×2 reference): Photorealistic, natural, contemporary “real creator” energy. Align subtly with SCRIPT_ACCENT for plausible demographics (skin tone, hair, styling) and CASTING — tasteful and respectful; avoid stereotypes or costume clichés.`;
 }
 
 function voiceLanguagePromptBlock(args: {
@@ -316,38 +417,45 @@ function voiceLanguagePromptBlock(args: {
   accentOther: string;
 }): string {
   const lang = args.lang;
-  const langLabel = resolveVoiceLanguageLabel(lang, args.langOther);
-  const accentLabel = resolveVoiceAccentLabel(args.accent, args.accentOther);
-  const accentBlock = `VOICE ACCENT / DIALECT TARGET: ${accentLabel}.
-- Keep it natural and easy to pronounce (no forced “caricature” spelling).
-- Let the accent show in word choice, rhythm, and common phrases more than weird spelling tricks.`;
+  const header = scriptLanguageAccentVariablesBlock(args);
 
   switch (lang) {
     case "darija":
-      return `VOICE LANGUAGE: Moroccan Darija (الدارجة المغربية) for ALL spoken lines — same colloquial level from the first word to the last.
-${accentBlock}
+      return `${header}
+
+VOICE DETAILS — apply SCRIPT_LANGUAGE + SCRIPT_ACCENT:
+Moroccan Darija (الدارجة المغربية) for ALL spoken lines — same colloquial level from the first word to the last.
 
 PRONUNCIATION — CRITICAL (Darija): Make every line easy to say out loud on camera or with TTS.
 - The “Style Examples” in the prompt may be transcriptions in MSA, mixed Arabic, or older ad copy — treat them ONLY as rhythm, energy, and structure hints. NEVER copy their formal Arabic phrasing or vocabulary into your output; translate the same ideas into real spoken Darija (كي…، غادي، دابا، شنو، واش، بزاف، مزيان، شري، دير، شوف، راه… style), not classroom Arabic.
-- Do NOT start with formal Arabic “ad copy” openings (e.g. heavy MSA like “عندك آلام في الظهر” / “هل تعاني من…”) and then switch to Darija — the whole script must sound like one Moroccan creator talking Darija throughout.
+- Do NOT start with formal Arabic “ad copy” openings (e.g. heavy MSA like “عندك آلام في الظهر” / “هل تعاني من…”) and then switch to Darija — the whole script must sound like one consistent Darija speaker throughout; SCRIPT_ACCENT shapes delivery and any allowed non-Darija snippets (e.g. French loans), not a switch into another dialect of Arabic.
 - Avoid heavy Classical Arabic (فصحى), rare literary words, case endings, and stiff MSA — prefer everyday Moroccan words people actually say in speech.
 - Avoid tongue-twisters, cramped phrasing, and awkward consonant clusters; use short, clear sentences.
 - Prefer simple, common Darija over fancy or “elevated” synonyms that are hard to pronounce.
 - If you write in Arabic letters, use natural Darija orthography as on Moroccan social (e.g. كيعطي، غادي، ما تبقاش) — not MSA newsreader phrasing with the same ideas re-written in فصحى.
 - Brand/product names: keep official spelling if required, but keep surrounding wording plain and natural to say.`;
     case "darija_french":
-      return `VOICE LANGUAGE: Natural Moroccan code-switching — Darija with French where people really use it in TikTok ads and daily talk.
-${accentBlock}
+      return `${header}
+
+VOICE DETAILS — apply SCRIPT_LANGUAGE + SCRIPT_ACCENT:
+Natural Moroccan code-switching — Darija with French where people really use it in TikTok ads and daily talk.
+SCRIPT_ACCENT steers how local the French feels and how dense the code-switch is (still believable for the chosen region).
 Keep both languages easy to pronounce: no ornate or rare French, no heavy فصحى in Darija stretches.
 - Style examples may be in MSA or formal Arabic — do NOT mirror that register in the Darija parts; keep Darija colloquial even when you borrow hook structure from examples.
 - Do not mix a formal Arabic intro (fully vocalized or MSA-style) with colloquial body — keep one consistent spoken register.
 - If Arabic script appears, it must be Darija-style wording, not formal marketing Arabic.`;
     case "french":
-      return `VOICE LANGUAGE: French for all spoken lines — natural, clear spoken French suited to short social ads (avoid stiff admin-style French).
-${accentBlock}`;
+      return `${header}
+
+VOICE DETAILS — apply SCRIPT_LANGUAGE + SCRIPT_ACCENT:
+French for all spoken lines — natural, clear spoken French suited to short social ads (avoid stiff admin-style French).
+Let SCRIPT_ACCENT guide everyday phrasing, fillers, and rhythm (e.g. Moroccan French vs Parisian) without breaking intelligibility.`;
     case "msa":
-      return `VOICE LANGUAGE: Modern Standard Arabic (العربية الفصحى) for all spoken lines — clear and sayable for short video (avoid archaic or overly poetic wording).
-${accentBlock}`;
+      return `${header}
+
+VOICE DETAILS — apply SCRIPT_LANGUAGE + SCRIPT_ACCENT:
+Modern Standard Arabic (العربية الفصحى) for all spoken lines — clear and sayable for short video (avoid archaic or overly poetic wording).
+SCRIPT_ACCENT may lightly influence pacing and how “spoken” vs “written” it feels, but do not replace MSA with a different Arabic dialect unless SCRIPT_LANGUAGE is Darija.`;
     case "english":
     case "spanish":
     case "portuguese":
@@ -356,10 +464,14 @@ ${accentBlock}`;
     case "amharic":
     case "yoruba":
     case "zulu":
-    case "other":
-      return `VOICE LANGUAGE: ${langLabel} for ALL spoken lines.
-${accentBlock}
+    case "other": {
+      const langName = voiceLanguageDisplayForPrompt(lang, args.langOther);
+      return `${header}
+
+VOICE DETAILS — apply SCRIPT_LANGUAGE + SCRIPT_ACCENT:
+${langName} for ALL spoken lines.
 PRONUNCIATION — CRITICAL: Keep the voiceover simple, natural, and easy to read out loud. Avoid rare words, tongue-twisters, and very long sentences.`;
+    }
     default:
       return voiceLanguagePromptBlock({
         lang: "darija",
@@ -414,7 +526,7 @@ function formatVeoAvoidWordsBlock(raw: string): string {
     .map((s) => s.trim())
     .filter(Boolean);
   if (parts.length === 0) return "";
-  return `GOOGLE VEO 3 / VIDEO — FORBIDDEN WORDS (CRITICAL): Never use these terms (or obvious close variants / unsafe wording) in dialogue, on-screen text, visual descriptions, or CTAs. Use safe Moroccan alternatives:
+  return `GOOGLE VEO 3 / VIDEO — FORBIDDEN WORDS (CRITICAL): Never use these terms (or obvious close variants / unsafe wording) in dialogue, on-screen text, visual descriptions, or CTAs. Replace with safe, on-brand wording that still matches SCRIPT_LANGUAGE and SCRIPT_ACCENT:
 ${parts.map((p) => `- ${p}`).join("\n")}`;
 }
 
@@ -1789,6 +1901,8 @@ export default function App() {
   type ScriptGenBundle = {
     productInfo: string;
     context: string;
+    /** Either uploaded examples or a SCRIPT_LANGUAGE/ACCENT-aware fallback */
+    styleExamplesBlock: string;
     wordCountHint: string;
     sceneInstruction: string;
     sceneCountNum: number;
@@ -1849,6 +1963,9 @@ export default function App() {
     ].filter(Boolean);
 
     const context = contextParts.join("\n\n\n");
+    const styleExamplesBlock = context.trim()
+      ? `Style Examples from previous videos / saved scripts:\n${context}`
+      : styleExamplesFallbackForPrompt();
 
     let productInfo = "All Products";
     if (selectedProductId !== "all") {
@@ -1886,6 +2003,7 @@ export default function App() {
     return {
       productInfo,
       context,
+      styleExamplesBlock,
       wordCountHint,
       sceneInstruction,
       sceneCountNum,
@@ -1987,14 +2105,13 @@ export default function App() {
       setGeneratedScript(null);
       setGeneratedScenes(null);
 
-      const prompt = `You are an expert Moroccan TikTok ad creative strategist.
-Propose a sharp ad concept (not the final voiceover yet).
+      const prompt = `${generationExpertRole("idea")}
 
 ${b.voiceLanguageBlock}
 
 ${b.castingBlock}
 
-Write the creative substance in the same language family as the VOICE LANGUAGE above (concept beats, hook angle, emotional arc, CTA direction). You may keep these section titles in Arabic with markdown **bold** exactly as listed:
+Write the creative substance in SCRIPT_LANGUAGE (and SCRIPT_ACCENT where it affects phrasing): concept beats, hook angle, emotional arc, CTA direction. You may keep these section titles in Arabic with markdown **bold** exactly as listed:
 
 Product Info: Name and Description
 ${b.productInfo}
@@ -2005,8 +2122,7 @@ ${b.wordCountHint}
 User's Custom Instructions / Tone:
 ${customPrompt || "Make it engaging and viral."}
 
-Style Examples from previous videos:
-${b.context || "Standard high-energy Moroccan TikTok slang."}
+${b.styleExamplesBlock}
 
 ${b.styleInstruction}
 
@@ -2053,7 +2169,7 @@ Required sections (fill under each title, be concise — strategy only, no scene
       setGeneratedScript(null);
       setGeneratedScenes(null);
 
-      const prompt = `You are an expert Moroccan TikTok voiceover writer. Output ONLY spoken words for the full ad.
+      const prompt = `${generationExpertRole("voice")}
 
 ${b.voiceLanguageBlock}
 
@@ -2071,15 +2187,14 @@ ${customPrompt || "Make it engaging and viral."}
 Creative idea (follow this angle closely):
 ${scriptIdea}
 
-Style Examples from previous videos:
-${b.context || "Standard high-energy Moroccan TikTok slang."}
+${b.styleExamplesBlock}
 
 ${b.styleInstruction}
 
 ${b.tashkeelBlock}
 ${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
 
-TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly following the VOICE LANGUAGE, script orthography / vocalization rules, and pronunciation rules above.
+TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly following SCRIPT_LANGUAGE, SCRIPT_ACCENT, script orthography / vocalization rules, and pronunciation rules above.
 - One continuous block; short line breaks between beats are OK.
 - NO markdown headings, NO scene labels, NO visual/B-roll instructions, NO bracketed stage directions.
 - Respect the word-count / duration rules strictly.
@@ -2118,12 +2233,12 @@ TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly follo
       setGeneratedScript(null);
       setGeneratedScenes(null);
 
-      const casting =
+      const castingDetail =
         modelGender === "any" && modelAge === "any"
-          ? "Any on-camera talent; natural Moroccan TikTok creator look."
-          : `Preferred casting: gender ${modelGender}, age vibe ${modelAge}.`;
+          ? "Any on-camera talent; natural creator / UGC look matching SCRIPT_ACCENT."
+          : `Preferred casting detail: gender ${modelGender}, age vibe ${modelAge}.`;
 
-      const prompt = `You are an expert prompt engineer for AI image and video tools (Veo, reference images, b-roll generators) for Moroccan TikTok / UGC-style ads.
+      const prompt = `${generationExpertRole("visuals")}
 
 ${b.voiceLanguageBlock}
 
@@ -2145,10 +2260,11 @@ LOCKED VOICE SCRIPT (match energy, who speaks on camera, product use):
 ${voiceOnlyScript}
 ---
 
-Casting: ${casting}
+Casting detail: ${castingDetail}
 
-Style Examples (for vibe only):
-${b.context || "Standard high-energy Moroccan TikTok slang."}
+${onCameraModelLookFromAccentBlock()}
+
+${b.styleExamplesBlock}
 
 ${b.styleInstruction}
 
@@ -2166,7 +2282,7 @@ ONE cohesive block (one or two dense paragraphs ONLY) — a single string the us
 
 OUTFIT — Must feel intentional and creator-ready, NOT generic "plain t-shirt only." Specify a rich, tasteful look: layered pieces or structured silhouette, interesting texture and color story (e.g. ribbed knit + tailored layer, quality loungewear set, modest fashion with fabric drape detail, denim + soft knit, coordinated accessories like minimal jewelry or watch, hijab fabric and wrap style if applicable). Makeup: soft camera-ready but still authentic; nails and grooming subtle. The outfit should match the product category mood (wellness, beauty, lifestyle) without looking like a catalog stock photo.
 
-CRITICAL — NO PRODUCT IN MODEL SHOTS: the talent must NOT hold, touch, or display any product, packaging, bottle, tube, jar, box, or brand object. Hands empty or natural gestures only (e.g. relaxed hands, adjusting hair, touching shoulder). Pure white seamless studio cyclorama in every quadrant (talent reference only — no room furniture). NO text, NO logos, NO watermarks; soft even key light + gentle fill; natural skin; Moroccan / North African look when appropriate; respect Casting and forbidden lists. Describe each quadrant (QL1…QL4) for pose and expression only — matching the MOOD of the LOCKED VOICE SCRIPT. Do NOT use "### Angle" subheadings — one continuous paragraph under ## Model.
+CRITICAL — NO PRODUCT IN MODEL SHOTS: the talent must NOT hold, touch, or display any product, packaging, bottle, tube, jar, box, or brand object. Hands empty or natural gestures only (e.g. relaxed hands, adjusting hair, touching shoulder). Pure white seamless studio cyclorama in every quadrant (talent reference only — no room furniture). NO text, NO logos, NO watermarks; soft even key light + gentle fill; natural skin; respect Casting, SCRIPT_ACCENT, and forbidden lists. Describe each quadrant (QL1…QL4) for pose and expression only — matching the MOOD of the LOCKED VOICE SCRIPT. Do NOT use "### Angle" subheadings — one continuous paragraph under ## Model.
 
 ## Background
 ONE paragraph — empty environment plate for the ENTIRE ad (same room in every scene; not a white cyclorama, not a blank white wall as the whole frame). Describe ONE simple, believable real-world interior with MINIMAL props — calm and uncrowded (avoid shelves packed with objects, busy patterns, or “a lot going on”). Only what fits the product mood: a few honest surfaces (mirror, counter, soft wall color, one plant or towel if needed)— nothing that screams “studio,” “ring light,” “filming setup,” “content creator,” or branded lighting gear. Natural daylight mood, soft and realistic; shallow depth of field OK. Absolutely NO people, NO hands, NO faces, NO reflections of a person, NO lamps or gear aimed at “creator” aesthetics unless it is a normal household lamp in the corner. Brand-safe; respect forbidden term lists.
@@ -2219,8 +2335,8 @@ Do not add any text before "## Model" or after the Background paragraph. Heading
     setError(null);
 
     try {
-      const prompt = `You are an expert Moroccan TikTok Ad Script Writer. 
-Write the full video ad breakdown (scenes, visuals, on-screen text, delivery tips). Use Moroccan Darija/Arabic for structure headings, stage directions, and structural visual notes as in the template below; spoken lines must stay exactly the locked script (same language as chosen by the user).
+      const prompt = `${generationExpertRole("video")}
+${videoBreakdownStructureNote(voiceScriptLanguage)}
 
 VISUAL ALIGNMENT — Use the LOCKED VISUAL PROMPTS below when writing [شنو تبيني فالفيديو] and any camera/setting notes: (1) Model = quadrants reference — white seamless, talent-only, styled outfit, NO product in hands. (2) Background = ONE simple real interior for the WHOLE video (sparse, not busy; not a white void studio) — SAME room every scene; do NOT change location between scenes unless the creative idea has one explicit exception. Stay consistent.
 
@@ -2285,15 +2401,14 @@ BACKGROUND LOCK — In [شنو تبيني فالفيديو] for every scene, kee
 **نصيحة في الأداء الصوتي:**
 *   **في المشهد الأول:** ...
 *   **في المشهد الثاني والثالث:** ...
-(Provide tips on how to deliver the voiceover — match the actual language of the locked script and keep advice practical for easy pronunciation.)
+(Provide tips on how to deliver the voiceover — match SCRIPT_LANGUAGE + SCRIPT_ACCENT; keep advice practical for easy pronunciation.)
 
 ---
 
 🎙️ **السكريبت الصوتي الكامل (Full Voice Script):**
 (Repeat the locked voice script verbatim here — spoken words only, no visual instructions).
 
-Style Examples from previous videos:
-${b.context || "Standard high-energy Moroccan TikTok slang."}`;
+${b.styleExamplesBlock}`;
 
       const responseText = await callAiChat(prompt, b.temperature);
       setGeneratedScript(responseText);
