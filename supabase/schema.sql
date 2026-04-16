@@ -112,7 +112,7 @@ create table if not exists public.video_history (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null references auth.users (id) on delete cascade,
   event_at timestamptz not null default now(),
-  data jsonb,
+  data jsonb, -- webhook JSON; app may add `veoInApp: { scenes, generatedInApp, updatedAt }` for in-app Veo packages
   raw_text text,
   video_url text,
   product_id text,

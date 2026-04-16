@@ -30,12 +30,15 @@ import {
   X,
   Upload,
   Edit2,
-  CheckCircle
+  CheckCircle,
+  Download,
+  Images
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Markdown from 'react-markdown';
 import localforage from 'localforage';
+import JSZip from 'jszip';
 
 import type { User } from "@supabase/supabase-js";
 import { apiUrl } from "./apiBase";
@@ -111,6 +114,15 @@ function generationErrorMessage(err: unknown): string {
     return "Quota / rate limit dial OpenAI t3ba. Jereb men ba3d wla chouf billing f platform.openai.com.";
   if (low.includes("not found") && low.includes("model"))
     return "Model ma-m7aynach. 7awel OPENAI_CHAT_MODEL=gpt-4o-mini f .env.";
+  if (
+    low.includes("aborted") ||
+    low.includes("abort") ||
+    low.includes("signal is aborted") ||
+    (err instanceof DOMException && err.name === "AbortError")
+  )
+    return "Timeout 3la OpenAI (180s / machhad). Jereb men ba3d — ila kaybqa, sgher script wla chof connexion.";
+  if (low.includes("failed to fetch") || low.includes("networkerror"))
+    return "Ma-t9rachch l-server dial l-API. T2ked: npm run dev 3la port 3000 (w Vite 3la 5173) wla zid VITE_DEV_API_ORIGIN f .env.";
   return `Generi: ${d.slice(0, 280)}`;
 }
 
@@ -408,6 +420,23 @@ function videoBreakdownStructureNote(lang: VoiceScriptLanguage): string {
 
 function onCameraModelLookFromAccentBlock(): string {
   return `ON-CAMERA MODEL LOOK (2×2 reference): Photorealistic, natural, contemporary “real creator” energy. Align subtly with SCRIPT_ACCENT for plausible demographics (skin tone, hair, styling) and CASTING — tasteful and respectful; avoid stereotypes or costume clichés.`;
+}
+
+/** “Kifach bghiti l-video tkon?” — must win over style examples so outputs don’t feel generic/repeated. */
+function formatUserToneBlockForPrompt(customPrompt: string): string {
+  const t = customPrompt.trim();
+  if (!t) {
+    return `=== USER TONE & DIRECTION (empty) ===
+The user did not add extra tone notes. Default: punchy, clear, creator-authentic short-form ad — still avoid copying example hooks verbatim.`;
+  }
+  return `=== USER TONE & DIRECTION (“Kifach bghiti l-video tkon?”) — HIGHEST PRIORITY ===
+${t}
+
+MANDATORY:
+- Shape hook angle, pacing, humor vs serious, storytelling vs direct sell, energy, POV, CTA, and word choice from THIS block.
+- If Style Examples below suggest a different vibe, IGNORE the conflicting parts of the examples — keep only loose rhythm hints if helpful.
+- Do NOT output a generic “same as last time” script or idea: the opening beat and CTA must clearly reflect THIS brief (not a paraphrase of examples).
+===`;
 }
 
 function voiceLanguagePromptBlock(args: {
@@ -1150,6 +1179,217 @@ const parseScenesData = (scenesData: any) => {
   return [];
 };
 
+const VEO_FULL_SCRIPT_MAX_CHARS = 100_000;
+
+/** Make.com payloads sometimes nest `scenes` under `data` / `payload` / `result`. */
+function pickScenesFromWebhookPayload(d: Record<string, unknown> | null | undefined): unknown {
+  if (!d || typeof d !== "object") return undefined;
+  const o = d as Record<string, unknown>;
+  const nested = (x: unknown): Record<string, unknown> | null =>
+    x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
+  return (
+    o.scenes ??
+    o.Scenes ??
+    o.sceneList ??
+    nested(o.data)?.scenes ??
+    nested(o.payload)?.scenes ??
+    nested(o.result)?.scenes ??
+    nested(o.output)?.scenes
+  );
+}
+
+function pickScriptFromWebhookPayload(d: Record<string, unknown> | null | undefined): string {
+  if (!d || typeof d !== "object") return "";
+  const o = d as Record<string, unknown>;
+  const nested = (x: unknown): Record<string, unknown> | null =>
+    x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
+  const from = (obj: Record<string, unknown> | null) => {
+    if (!obj) return "";
+    const s = obj.script ?? obj.markdown ?? obj.Script;
+    return typeof s === "string" ? s : "";
+  };
+  return (
+    from(o) ||
+    from(nested(o.data)) ||
+    from(nested(o.payload)) ||
+    from(nested(o.result)) ||
+    from(nested(o.output))
+  );
+}
+
+/** Scene uploads are keyed `${historyId}-${idx}-debut`; fall back to any key ending with that suffix if history id drifted. */
+function findSceneImageUrl(
+  images: Record<string, string>,
+  preferredHistoryId: string | null,
+  sceneIdx: number,
+  kind: "debut" | "fin"
+): string | null {
+  const pref =
+    preferredHistoryId != null && preferredHistoryId !== ""
+      ? `${preferredHistoryId}-${sceneIdx}-${kind}`
+      : null;
+  if (pref && images[pref]) return images[pref];
+  const suffix = `-${sceneIdx}-${kind}`;
+  const key = Object.keys(images).find((k) => k.endsWith(suffix));
+  return key ? images[key] ?? null : null;
+}
+
+async function fetchVeoScenePackageWithTimeout(
+  url: string,
+  body: unknown,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const id = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(id);
+  }
+}
+
+/** POST + JSON body; parse JSON response; throw with useful message if server returns non-JSON (e.g. Vercel timeout). */
+async function postAiJson(url: string, body: unknown, timeoutMs: number): Promise<Record<string, unknown>> {
+  const res = await fetchVeoScenePackageWithTimeout(url, body, timeoutMs);
+  const rawText = await res.text();
+  const ct = res.headers.get("content-type") ?? "";
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(rawText) as Record<string, unknown>;
+  } catch {
+    if (!res.ok) {
+      const hint =
+        rawText.trim() === ""
+          ? ` Body khawi — 9lban Vercel timeout (Hobby ~10s / function) wla crash. Content-Type: ${ct || "?"}`
+          : "";
+      throw new Error((rawText.trim().slice(0, 500) || `HTTP ${res.status}`) + hint);
+    }
+    throw new Error("Natija dial server ma-shi JSON.");
+  }
+  if (!res.ok) {
+    const errMsg = typeof data.error === "string" ? data.error.trim() : "";
+    throw new Error(errMsg || rawText.trim().slice(0, 500) || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+/** Fetch image as blob + extension (for ZIP; CORS must allow read on the image host). */
+async function fetchRemoteImageBlob(url: string): Promise<{ blob: Blob; ext: string }> {
+  const res = await fetch(url, { mode: "cors", credentials: "omit" });
+  if (!res.ok) {
+    throw new Error(`Download HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const t = (blob.type || "").toLowerCase();
+  let ext = ".jpg";
+  if (t.includes("png")) ext = ".png";
+  else if (t.includes("webp")) ext = ".webp";
+  else if (t.includes("gif")) ext = ".gif";
+  else if (t.includes("jpeg")) ext = ".jpg";
+  else {
+    try {
+      const p = new URL(url).pathname;
+      const m = p.match(/\.(png|jpe?g|webp|gif)$/i);
+      if (m) ext = m[0].toLowerCase();
+    } catch {
+      /* keep .jpg */
+    }
+  }
+  return { blob, ext };
+}
+
+/** Read Veo in-app packages stored under `video_history.data.veoInApp`. */
+function veoInAppFromHistoryData(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  const vi = d.veoInApp;
+  if (!vi || typeof vi !== "object") return null;
+  const v = vi as Record<string, unknown>;
+  if (!Array.isArray(v.scenes)) return null;
+  return {
+    scenes: v.scenes,
+    generatedInApp: Boolean(v.generatedInApp),
+    generating: false,
+    ...(v.partial === true ? { partial: true } : {}),
+  };
+}
+
+const REFERENCE_IMAGE_HISTORY_LS_KEY = "referenceImageHistoryV1";
+const REFERENCE_IMAGE_HISTORY_MAX = 80;
+
+function loadReferenceImageHistoryFromLs(): string[] {
+  try {
+    const raw = localStorage.getItem(REFERENCE_IMAGE_HISTORY_LS_KEY);
+    if (!raw) return [];
+    const j = JSON.parse(raw) as unknown;
+    if (!Array.isArray(j)) return [];
+    return j.filter(
+      (u): u is string => typeof u === "string" && /^https?:\/\//i.test(u.trim())
+    );
+  } catch {
+    return [];
+  }
+}
+
+function pushReferenceImageHistoryToLs(url: string) {
+  const u = typeof url === "string" ? url.trim() : "";
+  if (!/^https?:\/\//i.test(u)) return;
+  try {
+    const prev = loadReferenceImageHistoryFromLs().filter((x) => x !== u);
+    const next = [u, ...prev].slice(0, REFERENCE_IMAGE_HISTORY_MAX);
+    localStorage.setItem(REFERENCE_IMAGE_HISTORY_LS_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function buildReferenceImagePickOptions(
+  products: Product[],
+  session: { model: string | null; product: string | null; background: string | null },
+  saved: { model: string | null; product: string | null; background: string | null },
+  historyUrls: string[]
+): { url: string; label: string }[] {
+  const seen = new Set<string>();
+  const out: { url: string; label: string }[] = [];
+  let recentIdx = 0;
+  const add = (url: string | null | undefined, label: string) => {
+    if (!url || typeof url !== "string") return;
+    const v = url.trim();
+    if (!/^https?:\/\//i.test(v)) return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    out.push({ url: v, label });
+  };
+  for (const u of historyUrls) {
+    recentIdx += 1;
+    add(u, recentIdx === 1 ? "Récent (upload)" : `Récent (${recentIdx})`);
+  }
+  add(session.model, "Session · Model");
+  add(session.product, "Session · Product");
+  add(session.background, "Session · Background");
+  add(saved.model, "Script mkhbi · Model");
+  add(saved.product, "Script mkhbi · Produit");
+  add(saved.background, "Script mkhbi · Background");
+  for (const p of products) {
+    add(p.modelImageUrl, `${p.name} · model`);
+    add(p.productImageUrl, `${p.name} · produit`);
+  }
+  return out;
+}
+
+type ReferenceImagePickerSlot =
+  | "model"
+  | "product"
+  | "background"
+  | "savedModel"
+  | "savedProduct"
+  | "savedBackground";
+
 export default function App() {
   const workspaceDraft = useMemo(() => {
     const d = loadWorkspaceDraft();
@@ -1280,13 +1520,80 @@ export default function App() {
   const [savedScriptBackgroundImageFile, setSavedScriptBackgroundImageFile] = useState<File | null>(null);
   const [savedScriptBackgroundImageUrl, setSavedScriptBackgroundImageUrl] = useState<string | null>(null);
   const [isUploadingSavedBackground, setIsUploadingSavedBackground] = useState(false);
+
+  const [referenceImagePicker, setReferenceImagePicker] = useState<ReferenceImagePickerSlot | null>(null);
+  const [referenceHistoryTick, setReferenceHistoryTick] = useState(0);
+
+  const referenceImagePickOptions = useMemo(() => {
+    void referenceHistoryTick;
+    const historyUrls = loadReferenceImageHistoryFromLs();
+    return buildReferenceImagePickOptions(
+      products,
+      {
+        model: modelImageUrl,
+        product: productImageUrl,
+        background: backgroundImageUrl,
+      },
+      {
+        model: savedScriptModelImageUrl,
+        product: savedScriptProductImageUrl,
+        background: savedScriptBackgroundImageUrl,
+      },
+      historyUrls
+    );
+  }, [
+    referenceHistoryTick,
+    products,
+    modelImageUrl,
+    productImageUrl,
+    backgroundImageUrl,
+    savedScriptModelImageUrl,
+    savedScriptProductImageUrl,
+    savedScriptBackgroundImageUrl,
+  ]);
+
+  const applyReferenceImagePick = (slot: ReferenceImagePickerSlot, url: string) => {
+    const u = url.trim();
+    if (!u) return;
+    switch (slot) {
+      case "model":
+        setModelImageUrl(u);
+        setModelImageFile(null);
+        break;
+      case "product":
+        setProductImageUrl(u);
+        setProductImageFile(null);
+        break;
+      case "background":
+        setBackgroundImageUrl(u);
+        setBackgroundImageFile(null);
+        break;
+      case "savedModel":
+        setSavedScriptModelImageUrl(u);
+        setSavedScriptModelImageFile(null);
+        break;
+      case "savedProduct":
+        setSavedScriptProductImageUrl(u);
+        setSavedScriptProductImageFile(null);
+        break;
+      case "savedBackground":
+        setSavedScriptBackgroundImageUrl(u);
+        setSavedScriptBackgroundImageFile(null);
+        break;
+      default:
+        break;
+    }
+    setReferenceImagePicker(null);
+  };
   
   // Settings State
   const [webhookUrl, setWebhookUrl] = useState(() => localStorage.getItem('makeWebhookUrl') || '');
   const [imagesWebhookUrl, setImagesWebhookUrl] = useState(() => localStorage.getItem('imagesWebhookUrl') || '');
   const [isSavingWebhookSettings, setIsSavingWebhookSettings] = useState(false);
   const [isSendingWebhook, setIsSendingWebhook] = useState(false);
-  const [isSendingImages, setIsSendingImages] = useState(false);
+  const [isGeneratingVeoPackages, setIsGeneratingVeoPackages] = useState(false);
+  const [veoInlineProgress, setVeoInlineProgress] = useState<string | null>(null);
+  const [isDownloadingSceneStills, setIsDownloadingSceneStills] = useState(false);
   const [webhookStatus, setWebhookStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
   // Transcription State
@@ -1901,6 +2208,8 @@ export default function App() {
   type ScriptGenBundle = {
     productInfo: string;
     context: string;
+    /** “Kifach bghiti l-video tkon?” — prioritized over examples */
+    userToneBlock: string;
     /** Either uploaded examples or a SCRIPT_LANGUAGE/ACCENT-aware fallback */
     styleExamplesBlock: string;
     wordCountHint: string;
@@ -1984,9 +2293,12 @@ export default function App() {
     const wordCountHint = wordCountHintFromTotalSeconds(totalVideoSeconds);
 
     const isUniqueRequested = customPrompt.toLowerCase().includes("unique");
+    const hasUserTone = customPrompt.trim().length > 0;
     const styleInstruction = isUniqueRequested
       ? "CRITICAL INSTRUCTION: The user requested a UNIQUE script. DO NOT copy the examples. You MUST generate a completely NEW, UNIQUE, and DIFFERENT script. Do not repeat the exact same hooks or phrases."
-      : "INSTRUCTION: You can take inspiration, mix, and match elements from the Style Examples above (video transcriptions + saved script excerpts) for pacing, hooks, and vibe. DO NOT output the exact same script. Create a fresh variation.";
+      : hasUserTone
+        ? "INSTRUCTION: Style Examples are OPTIONAL background only. The USER TONE & DIRECTION block always wins for angle, tone, and structure. Do not drift back into “example-default” hooks or CTAs — every run must visibly match the user’s brief."
+        : "INSTRUCTION: You can take inspiration, mix, and match elements from the Style Examples above (video transcriptions + saved script excerpts) for pacing, hooks, and vibe. DO NOT output the exact same script. Create a fresh variation.";
 
     const sceneInstruction = `CRITICAL INSTRUCTION: You MUST divide the script into EXACTLY ${sceneCountNum} scenes. Each scene is EXACTLY ${SECONDS_PER_SCENE} seconds (total ${totalVideoSeconds} seconds). Scene timecodes: Scene 1 = 0–${SECONDS_PER_SCENE}s, Scene 2 = ${SECONDS_PER_SCENE}–${SECONDS_PER_SCENE * 2}s, … Scene ${sceneCountNum} = ${(sceneCountNum - 1) * SECONDS_PER_SCENE}–${totalVideoSeconds}s.`;
 
@@ -2022,7 +2334,8 @@ export default function App() {
       veoAvoidBlock,
       veoLockedVoiceNote,
       isUniqueRequested,
-      temperature: isUniqueRequested ? 0.9 : 0.7,
+      userToneBlock: formatUserToneBlockForPrompt(customPrompt),
+      temperature: isUniqueRequested ? 0.9 : hasUserTone ? 0.82 : 0.7,
     };
   };
 
@@ -2107,6 +2420,8 @@ export default function App() {
 
       const prompt = `${generationExpertRole("idea")}
 
+${b.userToneBlock}
+
 ${b.voiceLanguageBlock}
 
 ${b.castingBlock}
@@ -2118,9 +2433,6 @@ ${b.productInfo}
 
 ${b.videoTimingBlock}
 ${b.wordCountHint}
-
-User's Custom Instructions / Tone:
-${customPrompt || "Make it engaging and viral."}
 
 ${b.styleExamplesBlock}
 
@@ -2171,6 +2483,8 @@ Required sections (fill under each title, be concise — strategy only, no scene
 
       const prompt = `${generationExpertRole("voice")}
 
+${b.userToneBlock}
+
 ${b.voiceLanguageBlock}
 
 ${b.castingBlock}
@@ -2180,9 +2494,6 @@ ${b.productInfo}
 
 ${b.videoTimingBlock}
 ${b.wordCountHint}
-
-User's Custom Instructions / Tone:
-${customPrompt || "Make it engaging and viral."}
 
 Creative idea (follow this angle closely):
 ${scriptIdea}
@@ -2240,6 +2551,8 @@ TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly follo
 
       const prompt = `${generationExpertRole("visuals")}
 
+${b.userToneBlock}
+
 ${b.voiceLanguageBlock}
 
 ${b.castingBlock}
@@ -2248,9 +2561,6 @@ Product Info: Name and Description
 ${b.productInfo}
 
 ${b.videoTimingBlock}
-
-User's Custom Instructions / Tone:
-${customPrompt || "Make it engaging and viral."}
 
 Creative idea:
 ${scriptIdea ?? "(see voice script)"}
@@ -2338,6 +2648,8 @@ Do not add any text before "## Model" or after the Background paragraph. Heading
       const prompt = `${generationExpertRole("video")}
 ${videoBreakdownStructureNote(voiceScriptLanguage)}
 
+${b.userToneBlock}
+
 VISUAL ALIGNMENT — Use the LOCKED VISUAL PROMPTS below when writing [شنو تبيني فالفيديو] and any camera/setting notes: (1) Model = quadrants reference — white seamless, talent-only, styled outfit, NO product in hands. (2) Background = ONE simple real interior for the WHOLE video (sparse, not busy; not a white void studio) — SAME room every scene; do NOT change location between scenes unless the creative idea has one explicit exception. Stay consistent.
 
 ${b.voiceLanguageBlock}
@@ -2349,9 +2661,6 @@ ${b.productInfo}
 
 ${b.videoTimingBlock}
 ${b.wordCountHint}
-
-User's Custom Instructions / Tone:
-${customPrompt || "Make it engaging and viral."}
 
 ${b.tashkeelBlock}
 ${b.veoAvoidBlock ? `\n\n${b.veoAvoidBlock}` : ""}
@@ -2482,7 +2791,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setModelImageUrl(res[0].url);
+        const u = res[0].url;
+        setModelImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload model image:", err);
@@ -2506,7 +2818,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setProductImageUrl(res[0].url);
+        const u = res[0].url;
+        setProductImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload product image:", err);
@@ -2530,7 +2845,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setBackgroundImageUrl(res[0].url);
+        const u = res[0].url;
+        setBackgroundImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload background image:", err);
@@ -2642,6 +2960,7 @@ ${b.styleExamplesBlock}`;
         setSelectedHistoryId(null);
         setWebhookResponseData(null);
         setWebhookResponseText(null);
+        setVeoResponseData(null);
         setGeneratedVideoUrl(null);
       }
       setDeleteHistoryConfirmId(null);
@@ -2681,101 +3000,294 @@ ${b.styleExamplesBlock}`;
     return true;
   };
 
-  const sendImagesToWebhook = async () => {
-    if (!imagesWebhookUrl || !webhookResponseData || !webhookResponseData.scenes) return;
-
-    const parsedScenes = parseScenesData(webhookResponseData.scenes);
-    
-    // Check for missing images
-    const missingImages: string[] = [];
-    parsedScenes.forEach((scene: any, idx: number) => {
-      const sceneNum = scene.sceneNumber || scene.scene_number || (idx + 1);
-      if (!sceneImages[`${selectedHistoryId}-${idx}-debut`]) {
-        missingImages.push(`Scene ${sceneNum} - Debut`);
-      }
-      if (!sceneImages[`${selectedHistoryId}-${idx}-fin`]) {
-        missingImages.push(`Scene ${sceneNum} - Fin`);
-      }
-    });
-
-    if (showMissingImagesDialog(missingImages)) {
+  /** Analyze debut+fin per scene (vision) then build VEO 3.1 JSON packages in-app — no images webhook. */
+  const generateVeoScenePackagesInApp = async () => {
+    if (!webhookResponseData || typeof webhookResponseData !== "object") {
+      setError("Ma-kayn hta données dial l-webhook — sifet script l-webhook lwl.");
+      alert("Ma-kayn hta données dial l-webhook.");
       return;
     }
 
-    setIsSendingImages(true);
+    const wh = webhookResponseData as Record<string, unknown>;
+    const scenesRaw = pickScenesFromWebhookPayload(wh);
+    const parsedScenes = parseScenesData(scenesRaw);
+    if (!parsedScenes.length) {
+      const msg =
+        "Ma-l9inach `scenes` f natija dial l-webhook (wla ma-t9rachch). Chof Make.com: khass y-rje3 `scenes` (array wla string JSON) f body.";
+      setError(msg);
+      alert(msg);
+      return;
+    }
+
+    const missingImages: string[] = [];
+    parsedScenes.forEach((scene: any, idx: number) => {
+      const sceneNum = scene.sceneNumber || scene.scene_number || (idx + 1);
+      if (!findSceneImageUrl(sceneImages, selectedHistoryId, idx, "debut")) {
+        missingImages.push(`Scene ${sceneNum} - Debut`);
+      }
+      if (!findSceneImageUrl(sceneImages, selectedHistoryId, idx, "fin")) {
+        missingImages.push(`Scene ${sceneNum} - Fin`);
+      }
+    });
+    if (missingImages.length > 0) {
+      setError("Zid tsawer debut + fin l-koll machhad 9bel Generi Veo.");
+      if (showMissingImagesDialog(missingImages)) return;
+    }
+
+    if (!user || !selectedHistoryId) {
+      const msg =
+        "Khassek tkoun connecté w t-khtar video f History bach natija Veo t-tsajjel f Supabase (b7al sijil Video).";
+      setError(msg);
+      alert(msg);
+      return;
+    }
+
+    const scriptPart = (
+      pickScriptFromWebhookPayload(wh) ||
+      (typeof wh.script === "string" ? wh.script : "") ||
+      generatedScript ||
+      ""
+    ).trim();
+    const scenesStr =
+      scenesRaw === undefined || scenesRaw === null
+        ? ""
+        : typeof scenesRaw === "string"
+          ? scenesRaw
+          : JSON.stringify(scenesRaw, null, 2);
+    let fullScript = `${scriptPart}\n\n--- SCENE METADATA ---\n${scenesStr}`.trim();
+    if (fullScript.length > VEO_FULL_SCRIPT_MAX_CHARS) {
+      fullScript = `${fullScript.slice(0, VEO_FULL_SCRIPT_MAX_CHARS)}\n\n[TRUNCATED — script kbir bzaf]`;
+    }
+    const languageLabel = voiceLanguageDisplayForPrompt(voiceScriptLanguage, voiceScriptLanguageOther);
+
+    /** Working copy of webhook JSON merged with `veoInApp` for `video_history.data`. */
+    const historyPayload: Record<string, unknown> = { ...wh };
+
+    setIsGeneratingVeoPackages(true);
+    setVeoInlineProgress(null);
+    setError(null);
+    setActiveTab("veoResult");
+    setVeoResponseData({
+      scenes: [],
+      generatedInApp: true,
+      generating: true,
+      generationTotal: parsedScenes.length,
+    });
+
+    const packages: unknown[] = [];
+
+    const persistVeoToHistory = async (scenes: unknown[], extra?: { partial?: boolean }) => {
+      historyPayload.veoInApp = {
+        scenes,
+        generatedInApp: true,
+        updatedAt: new Date().toISOString(),
+        ...(extra?.partial ? { partial: true } : {}),
+      };
+      const { error: saveErr } = await supabase
+        .from("video_history")
+        .update({
+          event_at: new Date().toISOString(),
+          data: historyPayload,
+        })
+        .eq("id", selectedHistoryId)
+        .eq("owner_id", user.id);
+      if (saveErr) {
+        handleDbError(saveErr, OperationType.UPDATE, `video_history/${selectedHistoryId}`);
+      } else {
+        setWebhookResponseData({ ...historyPayload });
+      }
+    };
 
     try {
-      const refUseModel = !!modelImageUrl;
-      const refUseProduct = !!productImageUrl;
-      const refUseBackground = !!backgroundImageUrl;
+      for (let idx = 0; idx < parsedScenes.length; idx++) {
+        const scene = parsedScenes[idx] as Record<string, unknown>;
+        const sceneNum = Number(scene.sceneNumber ?? scene.scene_number ?? idx + 1);
+        const debutUrl = findSceneImageUrl(sceneImages, selectedHistoryId, idx, "debut");
+        const finUrl = findSceneImageUrl(sceneImages, selectedHistoryId, idx, "fin");
+        const debut = scene.debut as { prompt?: string } | string | undefined;
+        const fin = scene.fin as { prompt?: string } | string | undefined;
+        const debutPrompt =
+          typeof debut === "object" && debut && "prompt" in debut ? String(debut.prompt ?? "") : "";
+        const finPrompt =
+          typeof fin === "object" && fin && "prompt" in fin ? String(fin.prompt ?? "") : "";
 
-      const scenesPayload = parsedScenes.map((scene: any, idx: number) => ({
-        sceneNumber: scene.sceneNumber || scene.scene_number || (idx + 1),
-        debut_image_url: sceneImages[`${selectedHistoryId}-${idx}-debut`] || null,
-        fin_image_url: sceneImages[`${selectedHistoryId}-${idx}-fin`] || null,
-        debut_prompt: scene.debut?.prompt || "",
-        fin_prompt: scene.fin?.prompt || ""
-      }));
-
-      const payload = {
-        script: webhookResponseData.script || generatedScript,
-        scenes: scenesPayload,
-        /** Same reference URLs as main video webhook — public links for Veo / image refs */
-        modelImageUrl: modelImageUrl ?? null,
-        productImageUrl: productImageUrl ?? null,
-        backgroundImageUrl: backgroundImageUrl ?? null,
-        useModelRef: refUseModel,
-        useProductRef: refUseProduct,
-        useBackgroundRef: refUseBackground,
-        timestamp: new Date().toISOString(),
-        videoId: videoPageDisplayId(selectedHistoryId),
-      };
-
-      const response = await fetch(imagesWebhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (response.ok) {
-        const text = await response.text();
-        
-        // Mark as sent in history
-        if (selectedHistoryId && user) {
-          try {
-            const { error } = await supabase
-              .from("video_history")
-              .update({ sent_to_webhook: true })
-              .eq("id", selectedHistoryId);
-            if (error) throw error;
-            await refreshUserData(user.id);
-          } catch (err) {
-            console.error("Failed to update sent_to_webhook", err);
-          }
+        if (!debutUrl || !finUrl) {
+          throw new Error(`Tsawer na9sin l-machhad ${sceneNum} (debut/fin).`);
         }
 
-        try {
-          const data = JSON.parse(text);
-          setVeoResponseData(data);
-          setActiveTab('veoResult');
-          alert('Tsawer tsifto l-webhook b-naja7! (Veo Prompts wjdo)');
-        } catch (e) {
-          setVeoResponseData({ rawText: text });
-          setActiveTab('veoResult');
-          alert('Tsawer tsifto l-webhook b-naja7!');
+        setVeoInlineProgress(
+          `Machhad ${sceneNum} / ${parsedScenes.length} — vision (debut/fin)...`
+        );
+
+        const analyzeData = await postAiJson(
+          apiUrl("/api/ai/veo-scene-analyze"),
+          {
+            debutImageUrl: debutUrl,
+            finImageUrl: finUrl,
+            debutPrompt,
+            finPrompt,
+          },
+          180_000
+        );
+        const analysis =
+          typeof analyzeData.analysis === "string" ? analyzeData.analysis : "";
+
+        setVeoInlineProgress(
+          `Machhad ${sceneNum} / ${parsedScenes.length} — VEO JSON (ba3d vision)...`
+        );
+
+        const data = (await postAiJson(
+          apiUrl("/api/ai/veo-scene-package"),
+          {
+            fullScript,
+            sceneNumber: sceneNum,
+            languageLabel,
+            imageAnalysis: analysis,
+          },
+          180_000
+        )) as {
+          analysis?: string;
+          scenePackage?: unknown;
+          rawPackageText?: string;
+          parseError?: string;
+        };
+
+        if (data.scenePackage != null) {
+          packages.push({
+            ...(data.scenePackage as object),
+            _imageAnalysis: data.analysis ?? analysis,
+          });
+        } else {
+          packages.push({
+            sceneNumber: sceneNum,
+            _imageAnalysis: data.analysis ?? analysis,
+            _parseError: data.parseError ?? "JSON parse failed",
+            _rawPackageText: data.rawPackageText ?? "",
+          });
         }
-      } else {
-        alert('Mouchkil f tsifat d tsawer l-webhook.');
+
+        setVeoResponseData({
+          scenes: [...packages],
+          generatedInApp: true,
+          generating: true,
+          generationTotal: parsedScenes.length,
+        });
+
+        await persistVeoToHistory(packages);
       }
-    } catch (error) {
-      console.error("Error sending images to webhook:", error);
-      alert('Mouchkil f tsifat d tsawer l-webhook.');
+
+      setVeoResponseData({
+        scenes: packages,
+        generatedInApp: true,
+        generating: false,
+        generationTotal: parsedScenes.length,
+      });
+      setVeoInlineProgress(`Tkmel — ${packages.length} machhad / ${parsedScenes.length}.`);
+      await refreshUserData(user.id);
+    } catch (err) {
+      console.error(err);
+      const msg = generationErrorMessage(err);
+      setError(msg);
+      setVeoResponseData({
+        scenes: packages,
+        generatedInApp: true,
+        generating: false,
+        generationTotal: parsedScenes.length,
+      });
+      if (packages.length > 0) {
+        await persistVeoToHistory(packages, { partial: true });
+        await refreshUserData(user.id);
+      }
+      alert(msg);
     } finally {
-      setIsSendingImages(false);
+      setIsGeneratingVeoPackages(false);
+      window.setTimeout(() => setVeoInlineProgress(null), 4000);
     }
   };
+
+  const handleDownloadAllSceneStills = useCallback(async () => {
+    if (!selectedHistoryId) {
+      alert("Khtar video f History bach t-telecharger tsawer debut/fin.");
+      return;
+    }
+    const vid = selectedHistoryId;
+    type Entry = { idx: number; sceneNumber: number };
+    let entries: Entry[] = [];
+
+    const wh =
+      webhookResponseData && typeof webhookResponseData === "object"
+        ? (webhookResponseData as Record<string, unknown>)
+        : null;
+    const rawScenes = wh ? pickScenesFromWebhookPayload(wh) : undefined;
+    const parsed = rawScenes != null ? parseScenesData(rawScenes) : [];
+    if (parsed.length > 0) {
+      parsed.forEach((scene: any, idx: number) => {
+        const sceneNumber = Number(scene.sceneNumber ?? scene.scene_number ?? idx + 1);
+        entries.push({ idx, sceneNumber });
+      });
+    } else {
+      const prefix = `${vid}-`;
+      const idxSet = new Set<number>();
+      for (const k of Object.keys(sceneImages)) {
+        if (!k.startsWith(prefix)) continue;
+        const m = k.slice(prefix.length).match(/^(\d+)-(debut|fin)$/);
+        if (m) idxSet.add(Number(m[1]));
+      }
+      const sorted = [...idxSet].sort((a, b) => a - b);
+      entries = sorted.map((idx) => ({ idx, sceneNumber: idx + 1 }));
+    }
+
+    if (entries.length === 0) {
+      alert("Ma-l9itach machahid ola tsawer dial had video.");
+      return;
+    }
+
+    setIsDownloadingSceneStills(true);
+    try {
+      const idPrefix = (vid.length >= 3 ? vid.slice(0, 3) : vid || "id").replace(
+        /[/\\?%*:|"<>]/g,
+        "-"
+      );
+      const zip = new JSZip();
+      let added = 0;
+      for (const { idx, sceneNumber } of entries) {
+        const debutUrl = findSceneImageUrl(sceneImages, selectedHistoryId, idx, "debut");
+        const finUrl = findSceneImageUrl(sceneImages, selectedHistoryId, idx, "fin");
+        if (debutUrl) {
+          const { blob, ext } = await fetchRemoteImageBlob(debutUrl);
+          zip.file(`${idPrefix}-debut-${sceneNumber}${ext}`, blob);
+          added += 1;
+        }
+        if (finUrl) {
+          const { blob, ext } = await fetchRemoteImageBlob(finUrl);
+          zip.file(`${idPrefix}-fin-${sceneNumber}${ext}`, blob);
+          added += 1;
+        }
+      }
+      if (added === 0) {
+        alert("Ma-l9itach URLs dial tsawer (uploadi debut/fin 9bel).");
+        return;
+      }
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const zipName = `${idPrefix}-debut-fin-scenes.zip`;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(zipBlob);
+      a.download = zipName.replace(/[/\\?%*:|"<>]/g, "-");
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      console.error(e);
+      alert(
+        e instanceof Error
+          ? e.message
+          : "Mouchkil f-telechargement ZIP — t2ked men CORS (utfs.io) wla jereb browser akhor."
+      );
+    } finally {
+      setIsDownloadingSceneStills(false);
+    }
+  }, [selectedHistoryId, webhookResponseData, sceneImages]);
 
   const sendToWebhook = async () => {
     if (!webhookUrl || !generatedScript || generatedScript === "Smah lina, ma9dernach n-generiw script.") return;
@@ -2791,6 +3303,7 @@ ${b.styleExamplesBlock}`;
     setGeneratedVideoUrl(null);
     setWebhookResponseText(null);
     setWebhookResponseData(null);
+    setVeoResponseData(null);
     setActiveTab("videoResult");
 
     const historyId = await createVideoHistoryPending(selectedProductId);
@@ -2859,6 +3372,7 @@ ${b.styleExamplesBlock}`;
               setGeneratedVideoUrl(url);
               setWebhookResponseText(null);
               setWebhookResponseData(null);
+              setVeoResponseData(null);
               await finalizeVideoHistory(historyId, null, null, url);
             } else {
               console.log("Webhook response JSON:", data);
@@ -2866,6 +3380,7 @@ ${b.styleExamplesBlock}`;
                 setGeneratedVideoUrl(text);
                 setWebhookResponseText(null);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, null, text);
               } else {
                 setWebhookResponseText(text);
@@ -2897,6 +3412,7 @@ ${b.styleExamplesBlock}`;
                   }
                 }
                 setWebhookResponseData(parsedData);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, parsedData, text, null);
               }
             }
@@ -2904,6 +3420,7 @@ ${b.styleExamplesBlock}`;
             const brokenData = parseBrokenWebhookResponse(text);
             if (brokenData) {
               setWebhookResponseData(brokenData);
+              setVeoResponseData(null);
               setWebhookResponseText(null);
               await finalizeVideoHistory(historyId, brokenData, text, null);
             } else {
@@ -2912,11 +3429,13 @@ ${b.styleExamplesBlock}`;
                 setGeneratedVideoUrl(cleanText);
                 setWebhookResponseText(null);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, null, cleanText);
               } else {
                 console.log("Webhook raw response:", text);
                 setWebhookResponseText(text);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, text, null);
               }
             }
@@ -3027,7 +3546,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setSavedScriptModelImageUrl(res[0].url);
+        const u = res[0].url;
+        setSavedScriptModelImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload model image:", err);
@@ -3051,7 +3573,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setSavedScriptProductImageUrl(res[0].url);
+        const u = res[0].url;
+        setSavedScriptProductImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload product image:", err);
@@ -3075,7 +3600,10 @@ ${b.styleExamplesBlock}`;
         files: [file],
       });
       if (res && res.length > 0) {
-        setSavedScriptBackgroundImageUrl(res[0].url);
+        const u = res[0].url;
+        setSavedScriptBackgroundImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
       }
     } catch (err) {
       console.error("Failed to upload background image:", err);
@@ -3104,6 +3632,7 @@ ${b.styleExamplesBlock}`;
     setGeneratedVideoUrl(null);
     setWebhookResponseText(null);
     setWebhookResponseData(null);
+    setVeoResponseData(null);
     setScriptToSend(null);
     setActiveTab("videoResult");
 
@@ -3158,6 +3687,7 @@ ${b.styleExamplesBlock}`;
               setGeneratedVideoUrl(url);
               setWebhookResponseText(null);
               setWebhookResponseData(null);
+              setVeoResponseData(null);
               await finalizeVideoHistory(historyId, null, null, url);
             } else {
               console.log("Webhook response JSON:", data);
@@ -3165,6 +3695,7 @@ ${b.styleExamplesBlock}`;
                 setGeneratedVideoUrl(text);
                 setWebhookResponseText(null);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, null, text);
               } else {
                 setWebhookResponseText(text);
@@ -3196,6 +3727,7 @@ ${b.styleExamplesBlock}`;
                   }
                 }
                 setWebhookResponseData(parsedData);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, parsedData, text, null);
               }
             }
@@ -3203,6 +3735,7 @@ ${b.styleExamplesBlock}`;
             const brokenData = parseBrokenWebhookResponse(text);
             if (brokenData) {
               setWebhookResponseData(brokenData);
+              setVeoResponseData(null);
               setWebhookResponseText(null);
               await finalizeVideoHistory(historyId, brokenData, text, null);
             } else {
@@ -3211,11 +3744,13 @@ ${b.styleExamplesBlock}`;
                 setGeneratedVideoUrl(cleanText);
                 setWebhookResponseText(null);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, null, cleanText);
               } else {
                 console.log("Webhook raw response:", text);
                 setWebhookResponseText(text);
                 setWebhookResponseData(null);
+                setVeoResponseData(null);
                 await finalizeVideoHistory(historyId, null, text, null);
               }
             }
@@ -4222,11 +4757,22 @@ ${b.styleExamplesBlock}`;
                           Tsawer l-Webhook (khtiyari) — zidhom men ba3d ma y-tgenera script
                         </p>
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                          <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
-                            <input type="file" accept="image/*" className="hidden" onChange={handleModelImageUpload} disabled={isUploadingModel} />
-                            {isUploadingModel ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
-                            <span className="text-xs text-gray-500 truncate">{modelImageFile ? modelImageFile.name : "Model Ref"}</span>
-                          </label>
+                          <div className="flex-1 min-w-0 flex items-center gap-2">
+                            <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
+                              <input type="file" accept="image/*" className="hidden" onChange={handleModelImageUpload} disabled={isUploadingModel} />
+                              {isUploadingModel ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
+                              <span className="text-xs text-gray-500 truncate">{modelImageFile ? modelImageFile.name : "Model Ref"}</span>
+                            </label>
+                            <button
+                              type="button"
+                              title="Khtar men tsawer li deja uploditi"
+                              onClick={() => setReferenceImagePicker("model")}
+                              className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
+                            >
+                              <Images className="w-4 h-4 shrink-0" />
+                              <span className="hidden sm:inline">Déjà</span>
+                            </button>
+                          </div>
                           {modelImageUrl && (
                             <div className="w-12 h-12 rounded-lg overflow-hidden border border-gray-200 shrink-0 mx-auto sm:mx-0">
                               <img src={modelImageUrl} alt="Model" className="w-full h-full object-cover" />
@@ -4234,11 +4780,22 @@ ${b.styleExamplesBlock}`;
                           )}
                         </div>
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                          <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
-                            <input type="file" accept="image/*" className="hidden" onChange={handleProductImageUpload} disabled={isUploadingProduct} />
-                            {isUploadingProduct ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
-                            <span className="text-xs text-gray-500 truncate">{productImageFile ? productImageFile.name : "Product Ref"}</span>
-                          </label>
+                          <div className="flex-1 min-w-0 flex items-center gap-2">
+                            <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
+                              <input type="file" accept="image/*" className="hidden" onChange={handleProductImageUpload} disabled={isUploadingProduct} />
+                              {isUploadingProduct ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
+                              <span className="text-xs text-gray-500 truncate">{productImageFile ? productImageFile.name : "Product Ref"}</span>
+                            </label>
+                            <button
+                              type="button"
+                              title="Khtar men tsawer li deja uploditi"
+                              onClick={() => setReferenceImagePicker("product")}
+                              className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
+                            >
+                              <Images className="w-4 h-4 shrink-0" />
+                              <span className="hidden sm:inline">Déjà</span>
+                            </button>
+                          </div>
                           {productImageUrl && (
                             <div className="w-12 h-12 rounded-lg overflow-hidden border border-gray-200 shrink-0 mx-auto sm:mx-0">
                               <img src={productImageUrl} alt="Product" className="w-full h-full object-cover" />
@@ -4246,11 +4803,22 @@ ${b.styleExamplesBlock}`;
                           )}
                         </div>
                         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                          <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
-                            <input type="file" accept="image/*" className="hidden" onChange={handleBackgroundImageUpload} disabled={isUploadingBackground} />
-                            {isUploadingBackground ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
-                            <span className="text-xs text-gray-500 truncate">{backgroundImageFile ? backgroundImageFile.name : "Background Ref"}</span>
-                          </label>
+                          <div className="flex-1 min-w-0 flex items-center gap-2">
+                            <label className="flex-1 min-w-0 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
+                              <input type="file" accept="image/*" className="hidden" onChange={handleBackgroundImageUpload} disabled={isUploadingBackground} />
+                              {isUploadingBackground ? <Loader2 className="w-4 h-4 text-orange-500 animate-spin shrink-0" /> : <Upload className="w-4 h-4 text-gray-400 shrink-0" />}
+                              <span className="text-xs text-gray-500 truncate">{backgroundImageFile ? backgroundImageFile.name : "Background Ref"}</span>
+                            </label>
+                            <button
+                              type="button"
+                              title="Khtar men tsawer li deja uploditi"
+                              onClick={() => setReferenceImagePicker("background")}
+                              className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
+                            >
+                              <Images className="w-4 h-4 shrink-0" />
+                              <span className="hidden sm:inline">Déjà</span>
+                            </button>
+                          </div>
                           {backgroundImageUrl && (
                             <div className="w-12 h-12 rounded-lg overflow-hidden border border-gray-200 shrink-0 mx-auto sm:mx-0">
                               <img src={backgroundImageUrl} alt="Background" className="w-full h-full object-cover" />
@@ -4536,13 +5104,16 @@ ${b.styleExamplesBlock}`;
                               setGeneratedVideoUrl(item.videoUrl);
                               setWebhookResponseData(null);
                               setWebhookResponseText(null);
+                              setVeoResponseData(null);
                             } else if (item.data) {
                               setWebhookResponseData(item.data);
+                              setVeoResponseData(veoInAppFromHistoryData(item.data));
                               setWebhookResponseText(null);
                               setGeneratedVideoUrl(null);
                             } else if (item.rawText) {
                               setWebhookResponseText(item.rawText);
                               setWebhookResponseData(null);
+                              setVeoResponseData(null);
                               setGeneratedVideoUrl(null);
                             }
                           }}
@@ -4605,6 +5176,13 @@ ${b.styleExamplesBlock}`;
                 </h2>
               </div>
 
+              {error && (
+                <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-start gap-2 text-red-600 text-sm">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
+
               <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100 min-h-[400px] flex flex-col items-center justify-center text-center">
                 {isSendingWebhook ? (
                   <div className="space-y-6 flex flex-col items-center">
@@ -4651,15 +5229,34 @@ ${b.styleExamplesBlock}`;
                   <div className="w-full text-left space-y-6">
                     <div className="flex items-center justify-between border-b border-gray-100 pb-4">
                       <h3 className="font-bold text-gray-800">Natija mn l-Webhook</h3>
-                      <div className="flex items-center gap-2">
-                        <button 
-                          onClick={sendImagesToWebhook}
-                          disabled={isSendingImages || !imagesWebhookUrl}
-                          className="px-3 py-1.5 bg-orange-100 text-orange-700 hover:bg-orange-200 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 disabled:opacity-50"
-                          title="Sifet Tsawer l-Webhook"
+                      <div className="flex items-center gap-2 flex-wrap justify-end">
+                        <button
+                          type="button"
+                          onClick={() => void handleDownloadAllSceneStills()}
+                          disabled={!selectedHistoryId || isDownloadingSceneStills}
+                          className="px-3 py-1.5 bg-gray-100 text-gray-800 hover:bg-gray-200 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 disabled:opacity-50"
+                          title="ZIP: 3 l7roof lwlin dial video ID + smiyat XXX-debut-N / XXX-fin-N"
                         >
-                          {isSendingImages ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                          Sifet Tsawer
+                          {isDownloadingSceneStills ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Download className="w-4 h-4" />
+                          )}
+                          Telecharger ZIP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void generateVeoScenePackagesInApp()}
+                          disabled={isGeneratingVeoPackages}
+                          className="px-3 py-1.5 bg-orange-100 text-orange-700 hover:bg-orange-200 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 disabled:opacity-50"
+                          title="Generi packages Veo (OpenAI) — bla webhook"
+                        >
+                          {isGeneratingVeoPackages ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4" />
+                          )}
+                          Generi Veo (hna)
                         </button>
                         <button 
                           onClick={() => {
@@ -4698,6 +5295,9 @@ ${b.styleExamplesBlock}`;
                         </button>
                       </div>
                     </div>
+                    {(isGeneratingVeoPackages || veoInlineProgress) && (
+                      <p className="text-xs text-orange-700 px-1 pb-2">{veoInlineProgress ?? "Kan-tsenni…"}</p>
+                    )}
                     <div className="p-6 flex-1 overflow-y-auto">
                       {webhookResponseData.script && (
                         <div className="mb-6">
@@ -4907,9 +5507,102 @@ ${b.styleExamplesBlock}`;
           </div>
         )}
         {activeTab === 'veoResult' && (
-          <div className="w-full max-w-4xl mx-auto space-y-8">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold flex items-center gap-2">
+          <div className="w-full flex flex-col md:flex-row gap-8">
+            {webhookHistory.length > 0 && (
+              <div className="w-full md:w-64 flex-shrink-0 space-y-2">
+                <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+                  <History className="w-5 h-5 text-orange-500" />
+                  Sijil (videos)
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Khtar video mn l-liste bach tchouf Veo (w script webhook) li m-rboutin b had sijil.
+                </p>
+                <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
+                  <div className="max-h-[560px] overflow-y-auto">
+                    {webhookHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        className={cn(
+                          "w-full text-left p-4 border-b border-gray-50 hover:bg-orange-50 transition-colors relative group",
+                          selectedHistoryId === item.id ? "bg-orange-50 border-l-4 border-l-orange-500" : ""
+                        )}
+                      >
+                        <button
+                          type="button"
+                          className="w-full text-left"
+                          onClick={() => {
+                            setSelectedHistoryId(item.id);
+                            if (item.videoUrl) {
+                              setGeneratedVideoUrl(item.videoUrl);
+                              setWebhookResponseData(null);
+                              setWebhookResponseText(null);
+                              setVeoResponseData(null);
+                            } else if (item.data) {
+                              setWebhookResponseData(item.data);
+                              setVeoResponseData(veoInAppFromHistoryData(item.data));
+                              setWebhookResponseText(null);
+                              setGeneratedVideoUrl(null);
+                            } else if (item.rawText) {
+                              setWebhookResponseText(item.rawText);
+                              setWebhookResponseData(null);
+                              setVeoResponseData(null);
+                              setGeneratedVideoUrl(null);
+                            }
+                          }}
+                        >
+                          <div className="flex justify-between items-start mb-1">
+                            <div className="text-sm font-bold text-gray-800 truncate pr-2 flex items-center gap-2">
+                              {item.name ||
+                                (item.productId
+                                  ? products.find((p) => p.id === item.productId)?.name || "Produit"
+                                  : "Natija")}
+                              {item.sentToWebhook && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-medium">
+                                  <CheckCircle className="w-3 h-3" /> Siftnah
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-md border border-gray-200 shrink-0">
+                              #{item.id.slice(-5)}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {new Date(item.timestamp).toLocaleString("fr-FR", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              year: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </div>
+                        </button>
+                        <div className="absolute right-2 bottom-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => renameHistoryItem(item.id, e)}
+                            className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-md transition-colors"
+                            title="Bddel Smiya"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => deleteHistoryItem(item.id, e)}
+                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                            title="Mse7"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="flex-1 min-w-0 max-w-4xl mx-auto md:mx-0 space-y-8">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <h2 className="text-2xl font-bold flex items-center gap-2 flex-wrap">
                 <Sparkles className="w-6 h-6 text-orange-500" />
                 Veo Prompts (Natija d Tsawer)
                 {selectedHistoryId && (
@@ -4918,36 +5611,236 @@ ${b.styleExamplesBlock}`;
                   </span>
                 )}
               </h2>
+              <button
+                type="button"
+                onClick={() => void handleDownloadAllSceneStills()}
+                disabled={!selectedHistoryId || isDownloadingSceneStills}
+                className="shrink-0 px-4 py-2 bg-gray-100 text-gray-800 hover:bg-gray-200 rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-50 border border-gray-200"
+                title="Fichier ZIP: 3 l7roof lwlin dial ID + XXX-debut-N · XXX-fin-N"
+              >
+                {isDownloadingSceneStills ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                Telecharger ZIP (debut/fin)
+              </button>
             </div>
+
+            {error && (
+              <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-start gap-2 text-red-600 text-sm">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
             
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
               {veoResponseData ? (
                 <div className="p-6">
+                  {(isGeneratingVeoPackages || veoResponseData.generating) && (
+                    <div className="mb-6 p-4 rounded-xl border border-orange-200 bg-orange-50/80 flex flex-col sm:flex-row sm:items-center gap-3">
+                      <Loader2 className="w-8 h-8 text-orange-500 animate-spin shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-gray-900">Kan-generi Veo (machhad b-machhad)</p>
+                        <p className="text-sm text-gray-600 truncate">
+                          {veoInlineProgress ?? "Kan-tsenni…"}
+                        </p>
+                        {Array.isArray(veoResponseData.scenes) && veoResponseData.generationTotal != null ? (
+                          <p className="text-xs text-orange-800 mt-1">
+                            T-wslat: {veoResponseData.scenes.length} / {veoResponseData.generationTotal} — kol machhad
+                            yban hna 9bel ma y-kml l-li mura.
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
                   {(veoResponseData.scenes && Array.isArray(veoResponseData.scenes)) || Array.isArray(veoResponseData) ? (
                     <div className="space-y-8">
                       {(Array.isArray(veoResponseData) ? veoResponseData : veoResponseData.scenes).map((scene: any, idx: number) => {
-                        // Extract prompts, handling different possible JSON structures
+                        const sceneNo = scene.sceneNumber || scene.scene_number || idx + 1;
                         let prompts: string[] = [];
                         if (scene.veo_prompts && Array.isArray(scene.veo_prompts)) {
                           prompts = scene.veo_prompts;
                         } else if (scene.prompts && Array.isArray(scene.prompts)) {
                           prompts = scene.prompts;
                         } else {
-                          // Try to find any string values that look like prompts
-                          Object.keys(scene).forEach(key => {
-                            if (key.toLowerCase().includes('prompt') && typeof scene[key] === 'string') {
+                          Object.keys(scene).forEach((key) => {
+                            if (
+                              key.toLowerCase().includes("prompt") &&
+                              typeof scene[key] === "string" &&
+                              key !== "negativePrompt"
+                            ) {
                               prompts.push(scene[key]);
                             }
                           });
                         }
 
+                        const hasVeo31 =
+                          typeof scene.veoPrompt === "string" &&
+                          scene.veoPrompt.trim().length > 0;
+
+                        const debutPreview =
+                          selectedHistoryId != null
+                            ? findSceneImageUrl(sceneImages, selectedHistoryId, idx, "debut")
+                            : null;
+                        const finPreview =
+                          selectedHistoryId != null
+                            ? findSceneImageUrl(sceneImages, selectedHistoryId, idx, "fin")
+                            : null;
+
                         return (
-                          <div key={idx} className="bg-gray-50 rounded-xl p-6 border border-gray-200">
-                            <h3 className="font-bold text-lg text-gray-800 mb-4 border-b border-gray-200 pb-2">
-                              Scene {scene.sceneNumber || scene.scene_number || (idx + 1)}
-                            </h3>
-                            
-                            {prompts.length > 0 ? (
+                          <div
+                            key={String(scene.sceneNumber ?? scene.scene_number ?? idx)}
+                            className="bg-gray-50 rounded-xl p-6 border border-gray-200"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4 border-b border-gray-200 pb-4">
+                              <h3 className="font-bold text-lg text-gray-800 shrink-0">
+                                Scene {sceneNo}
+                                {veoResponseData?.generatedInApp && (
+                                  <span className="ml-2 text-xs font-normal text-gray-500">(VEO 3.1 — hna)</span>
+                                )}
+                              </h3>
+                              {selectedHistoryId && (
+                                <div className="flex gap-3 shrink-0">
+                                  <div className="text-center">
+                                    <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
+                                      Debut
+                                    </span>
+                                    {debutPreview ? (
+                                      <img
+                                        src={debutPreview}
+                                        alt={`Scene ${sceneNo} debut`}
+                                        className="w-[4.5rem] h-28 sm:w-24 sm:h-32 object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
+                                      />
+                                    ) : (
+                                      <div className="w-[4.5rem] h-28 sm:w-24 sm:h-32 rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center">
+                                        Mazal ma-t-uploadiwch
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="text-center">
+                                    <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
+                                      Fin
+                                    </span>
+                                    {finPreview ? (
+                                      <img
+                                        src={finPreview}
+                                        alt={`Scene ${sceneNo} fin`}
+                                        className="w-[4.5rem] h-28 sm:w-24 sm:h-32 object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
+                                      />
+                                    ) : (
+                                      <div className="w-[4.5rem] h-28 sm:w-24 sm:h-32 rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center">
+                                        Mazal ma-t-uploadiwch
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {scene._parseError && (
+                              <div className="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-100 rounded-lg p-3">
+                                JSON ma-t9rach: {scene._parseError}
+                                {scene._rawPackageText ? (
+                                  <pre className="mt-2 text-xs whitespace-pre-wrap max-h-48 overflow-auto">
+                                    {scene._rawPackageText}
+                                  </pre>
+                                ) : null}
+                              </div>
+                            )}
+
+                            {typeof scene._imageAnalysis === "string" && scene._imageAnalysis.trim() && (
+                              <details className="mb-4 text-sm rounded-lg border border-gray-100 bg-white group">
+                                <summary className="cursor-pointer list-none px-3 py-2 font-medium text-gray-600 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                                  <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
+                                  Image analysis (debut → fin)
+                                </summary>
+                                <pre className="mt-0 text-xs text-gray-700 whitespace-pre-wrap bg-gray-50/80 p-3 border-t border-gray-100 max-h-56 overflow-auto">
+                                  {scene._imageAnalysis}
+                                </pre>
+                              </details>
+                            )}
+
+                            {hasVeo31 ? (
+                              <div className="space-y-3">
+                                <div className="flex gap-1.5 items-stretch">
+                                  <details className="flex-1 min-w-0 text-sm rounded-lg border border-gray-100 bg-white shadow-sm group">
+                                    <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-gray-700 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                                      <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
+                                      <span className="text-xs font-bold text-orange-500 uppercase tracking-wider">
+                                        veoPrompt
+                                      </span>
+                                    </summary>
+                                    <div className="px-3 pb-3 border-t border-gray-50">
+                                      <p className="text-gray-700 text-sm whitespace-pre-wrap pt-2">
+                                        {scene.veoPrompt}
+                                      </p>
+                                    </div>
+                                  </details>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(scene.veoPrompt);
+                                      alert("T-copia veoPrompt!");
+                                    }}
+                                    className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-orange-500 rounded-lg hover:bg-orange-50 border border-transparent hover:border-orange-100"
+                                    title="Copi veoPrompt"
+                                  >
+                                    <Copy className="w-4 h-4" />
+                                  </button>
+                                </div>
+                                {typeof scene.negativePrompt === "string" && scene.negativePrompt.trim() && (
+                                  <div className="flex gap-1.5 items-stretch">
+                                    <details className="flex-1 min-w-0 text-sm rounded-lg border border-gray-100 bg-white shadow-sm group">
+                                      <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-gray-700 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                                        <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
+                                        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                                          negativePrompt
+                                        </span>
+                                      </summary>
+                                      <div className="px-3 pb-3 border-t border-gray-50">
+                                        <p className="text-gray-700 text-sm whitespace-pre-wrap pt-2">
+                                          {scene.negativePrompt}
+                                        </p>
+                                      </div>
+                                    </details>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(scene.negativePrompt);
+                                        alert("T-copia negativePrompt!");
+                                      }}
+                                      className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 border border-transparent hover:border-gray-200"
+                                      title="Copi negativePrompt"
+                                    >
+                                      <Copy className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                )}
+                                <div className="flex gap-1.5 items-stretch">
+                                  <details className="flex-1 min-w-0 text-sm rounded-lg border border-gray-100 bg-white group">
+                                    <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-gray-600 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                                      <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
+                                      Full JSON
+                                    </summary>
+                                    <pre className="mt-0 text-xs bg-gray-50/80 p-3 border-t border-gray-100 overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap font-mono">
+                                      {JSON.stringify(scene, null, 2)}
+                                    </pre>
+                                  </details>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(JSON.stringify(scene, null, 2));
+                                      alert("T-copia Full JSON!");
+                                    }}
+                                    className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-orange-500 rounded-lg hover:bg-orange-50 border border-transparent hover:border-orange-100"
+                                    title="Copi Full JSON"
+                                  >
+                                    <Copy className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : prompts.length > 0 ? (
                               <div className="space-y-4">
                                 {prompts.map((prompt: string, pIdx: number) => (
                                   <div key={pIdx} className="bg-white p-4 rounded-lg border border-gray-100 shadow-sm relative group">
@@ -4956,7 +5849,8 @@ ${b.styleExamplesBlock}`;
                                         <span className="text-xs font-bold text-orange-500 uppercase tracking-wider mb-1 block">Veo Prompt {pIdx + 1}</span>
                                         <p className="text-gray-700 text-sm">{prompt}</p>
                                       </div>
-                                      <button 
+                                      <button
+                                        type="button"
                                         onClick={() => {
                                           navigator.clipboard.writeText(prompt);
                                           alert("T-copia Prompt!");
@@ -4979,6 +5873,16 @@ ${b.styleExamplesBlock}`;
                           </div>
                         );
                       })}
+                      {veoResponseData.generating &&
+                        typeof veoResponseData.generationTotal === "number" &&
+                        Array.isArray(veoResponseData.scenes) &&
+                        veoResponseData.scenes.length < veoResponseData.generationTotal && (
+                          <div className="rounded-xl border border-dashed border-orange-200 bg-orange-50/50 p-6 text-center text-sm text-gray-700">
+                            <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-orange-500" />
+                            Machhad {veoResponseData.scenes.length + 1} /{" "}
+                            {veoResponseData.generationTotal} — mazal f OpenAI…
+                          </div>
+                        )}
                     </div>
                   ) : veoResponseData.rawText ? (
                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
@@ -4999,11 +5903,20 @@ ${b.styleExamplesBlock}`;
               ) : (
                 <div className="p-12 text-center text-gray-400 flex flex-col items-center justify-center">
                   <Sparkles className="w-12 h-12 mb-4 opacity-20" />
-                  <p>Mazal mawslat hta natija mn l-webhook dyal tsawer.</p>
-                  <p className="text-sm mt-2">Sifet tsawer mn l-onglet "Video" bach tchouf natija hna.</p>
+                  <p>Mazal ma-generit hta package Veo.</p>
+                  <p className="text-sm mt-2 max-w-md">
+                    Mn onglet Video: mlli y-wjdo script dyal l-webhook o tsawer debut/fin l-koll machhad,
+                    click Generi Veo (hna) — OpenAI ghadi y7ell tsawer o y-generi JSON (bla webhook).
+                  </p>
+                  {webhookHistory.length === 0 && (
+                    <p className="text-sm mt-2 text-gray-500">
+                      Ila ma-kaynach liste: connecté b-compte li fih sijil videos.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
+          </div>
           </div>
         )}
 
@@ -5052,7 +5965,7 @@ ${b.styleExamplesBlock}`;
                   placeholder="https://hook.eu1.make.com/..."
                 />
                 <p className="text-xs text-gray-500 mt-2">
-                  POST dial prompts / tsawer dyal l-machahid.
+                  (Ikhtiyari / legacy) POST l-Make. Veo dial l-app daba k-ykhdem b OpenAI hna — ma-mo7tajch had URL bach t-generi packages.
                 </p>
               </div>
               <button
@@ -5149,7 +6062,7 @@ ${b.styleExamplesBlock}`;
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4">
             <h3 className="text-xl font-bold text-gray-900">Tsawer Na9sin</h3>
-            <p className="text-gray-600">Khassek t-uploadi had tsawer 9bel ma tsifet l-webhook:</p>
+            <p className="text-gray-600">Khassek t-uploadi had tsawer 9bel ma t-generi Veo (hna):</p>
             <ul className="list-disc list-inside text-sm text-gray-700 max-h-40 overflow-y-auto bg-gray-50 p-3 rounded-lg border border-gray-200">
               {missingImagesDialog.map((img, i) => (
                 <li key={i}>{img}</li>
@@ -5161,6 +6074,74 @@ ${b.styleExamplesBlock}`;
                 className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white font-medium rounded-xl transition-colors"
               >
                 Fhmt
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {referenceImagePicker != null && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="ref-pick-title"
+          onClick={() => setReferenceImagePicker(null)}
+        >
+          <div
+            className="bg-white rounded-2xl p-5 max-w-lg w-full max-h-[85vh] flex flex-col shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-start gap-3 mb-2">
+              <h3 id="ref-pick-title" className="text-lg font-bold text-gray-900 pr-2">
+                Khtar tswira
+              </h3>
+              <button
+                type="button"
+                onClick={() => setReferenceImagePicker(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 shrink-0"
+                aria-label="Fermer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 mb-3">
+              Men récent, session, script mkhbi, wla tsawer l-produits — ma-t7tajch t3awd upload nfs l-fichier.
+            </p>
+            {referenceImagePickOptions.length === 0 ? (
+              <p className="text-sm text-gray-500 py-8 text-center">
+                Ma kayn walu · uplodi tswira lwel mra bach t-tsajel f s-sijil dial had n-navigateur.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 overflow-y-auto max-h-[55vh] pr-1">
+                {referenceImagePickOptions.map(({ url, label }) => {
+                  const slot = referenceImagePicker;
+                  if (slot == null) return null;
+                  return (
+                    <button
+                      key={url}
+                      type="button"
+                      onClick={() => applyReferenceImagePick(slot, url)}
+                      className="group text-left rounded-xl border border-gray-200 overflow-hidden hover:border-orange-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+                    >
+                      <div className="aspect-square bg-gray-100">
+                        <img src={url} alt="" className="w-full h-full object-cover" loading="lazy" />
+                      </div>
+                      <p className="text-[10px] leading-tight text-gray-600 px-1.5 py-1 truncate" title={label}>
+                        {label}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="flex justify-end pt-4 mt-3 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setReferenceImagePicker(null)}
+                className="px-4 py-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl text-sm font-medium transition-colors"
+              >
+                Lghi
               </button>
             </div>
           </div>
@@ -5327,24 +6308,35 @@ ${b.styleExamplesBlock}`;
               {/* Model Image Upload */}
               <div className="space-y-2">
                 <label className="block text-sm font-medium text-gray-700">Tswira dyal l-Model (Khtiyari)</label>
-                <div className="flex items-center gap-4">
-                  <label className="flex-1 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      onChange={handleSavedModelImageUpload}
-                      disabled={isUploadingSavedModel}
-                    />
-                    {isUploadingSavedModel ? (
-                      <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
-                    ) : (
-                      <Upload className="w-5 h-5 text-gray-400" />
-                    )}
-                    <span className="text-sm text-gray-500">
-                      {savedScriptModelImageFile ? savedScriptModelImageFile.name : 'Zid tswira d l-model'}
-                    </span>
-                  </label>
+                <div className="flex items-center gap-2 sm:gap-4">
+                  <div className="flex-1 min-w-0 flex items-stretch gap-2">
+                    <label className="flex-1 min-w-0 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={handleSavedModelImageUpload}
+                        disabled={isUploadingSavedModel}
+                      />
+                      {isUploadingSavedModel ? (
+                        <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
+                      <span className="text-sm text-gray-500 text-center break-all">
+                        {savedScriptModelImageFile ? savedScriptModelImageFile.name : 'Zid tswira d l-model'}
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      title="Khtar men tsawer li deja uploditi"
+                      onClick={() => setReferenceImagePicker("savedModel")}
+                      className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
+                    >
+                      <Images className="w-4 h-4 shrink-0" />
+                      <span className="hidden sm:block max-w-[3.5rem] text-center leading-tight">Déjà</span>
+                    </button>
+                  </div>
                   {savedScriptModelImageUrl && (
                     <div className="w-16 h-16 rounded-xl overflow-hidden border border-gray-200 shrink-0">
                       <img src={savedScriptModelImageUrl} alt="Model" className="w-full h-full object-cover" />
@@ -5356,24 +6348,35 @@ ${b.styleExamplesBlock}`;
               {/* Product Image Upload */}
               <div className="space-y-2">
                 <label className="block text-sm font-medium text-gray-700">Tswira dyal l-Produit (Khtiyari)</label>
-                <div className="flex items-center gap-4">
-                  <label className="flex-1 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      onChange={handleSavedProductImageUpload}
-                      disabled={isUploadingSavedProduct}
-                    />
-                    {isUploadingSavedProduct ? (
-                      <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
-                    ) : (
-                      <Upload className="w-5 h-5 text-gray-400" />
-                    )}
-                    <span className="text-sm text-gray-500">
-                      {savedScriptProductImageFile ? savedScriptProductImageFile.name : 'Zid tswira d l-produit'}
-                    </span>
-                  </label>
+                <div className="flex items-center gap-2 sm:gap-4">
+                  <div className="flex-1 min-w-0 flex items-stretch gap-2">
+                    <label className="flex-1 min-w-0 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={handleSavedProductImageUpload}
+                        disabled={isUploadingSavedProduct}
+                      />
+                      {isUploadingSavedProduct ? (
+                        <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
+                      <span className="text-sm text-gray-500 text-center break-all">
+                        {savedScriptProductImageFile ? savedScriptProductImageFile.name : 'Zid tswira d l-produit'}
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      title="Khtar men tsawer li deja uploditi"
+                      onClick={() => setReferenceImagePicker("savedProduct")}
+                      className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
+                    >
+                      <Images className="w-4 h-4 shrink-0" />
+                      <span className="hidden sm:block max-w-[3.5rem] text-center leading-tight">Déjà</span>
+                    </button>
+                  </div>
                   {savedScriptProductImageUrl && (
                     <div className="w-16 h-16 rounded-xl overflow-hidden border border-gray-200 shrink-0">
                       <img src={savedScriptProductImageUrl} alt="Product" className="w-full h-full object-cover" />
@@ -5385,24 +6388,35 @@ ${b.styleExamplesBlock}`;
               {/* Background Image Upload */}
               <div className="space-y-2">
                 <label className="block text-sm font-medium text-gray-700">Tswira dyal l-Background (Khtiyari)</label>
-                <div className="flex items-center gap-4">
-                  <label className="flex-1 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      className="hidden" 
-                      onChange={handleSavedBackgroundImageUpload}
-                      disabled={isUploadingSavedBackground}
-                    />
-                    {isUploadingSavedBackground ? (
-                      <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
-                    ) : (
-                      <Upload className="w-5 h-5 text-gray-400" />
-                    )}
-                    <span className="text-sm text-gray-500">
-                      {savedScriptBackgroundImageFile ? savedScriptBackgroundImageFile.name : 'Zid tswira d l-background'}
-                    </span>
-                  </label>
+                <div className="flex items-center gap-2 sm:gap-4">
+                  <div className="flex-1 min-w-0 flex items-stretch gap-2">
+                    <label className="flex-1 min-w-0 cursor-pointer border-2 border-dashed border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors flex flex-col items-center justify-center gap-2">
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={handleSavedBackgroundImageUpload}
+                        disabled={isUploadingSavedBackground}
+                      />
+                      {isUploadingSavedBackground ? (
+                        <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
+                      <span className="text-sm text-gray-500 text-center break-all">
+                        {savedScriptBackgroundImageFile ? savedScriptBackgroundImageFile.name : 'Zid tswira d l-background'}
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      title="Khtar men tsawer li deja uploditi"
+                      onClick={() => setReferenceImagePicker("savedBackground")}
+                      className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
+                    >
+                      <Images className="w-4 h-4 shrink-0" />
+                      <span className="hidden sm:block max-w-[3.5rem] text-center leading-tight">Déjà</span>
+                    </button>
+                  </div>
                   {savedScriptBackgroundImageUrl && (
                     <div className="w-16 h-16 rounded-xl overflow-hidden border border-gray-200 shrink-0">
                       <img src={savedScriptBackgroundImageUrl} alt="Background" className="w-full h-full object-cover" />

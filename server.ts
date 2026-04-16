@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
+import { runVeoSceneAnalyze, runVeoScenePackage } from "./lib/veoScenePackage";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -21,6 +22,67 @@ export const uploadRouter = {
 } satisfies FileRouter;
 
 export type OurFileRouter = typeof uploadRouter;
+
+/** Express 4 does not catch `async` route rejections — forward to `next` so JSON error middleware runs. */
+function wrapAsync(
+  fn: (req: express.Request, res: express.Response) => Promise<void>
+): express.RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res)).catch(next);
+  };
+}
+
+function safeErrMessage(e: unknown): string {
+  try {
+    return (e instanceof Error ? e.message : String(e)).slice(0, 800);
+  } catch {
+    return "Error ma-t9rachch.";
+  }
+}
+
+function sendJson(
+  res: express.Response,
+  status: number,
+  body: Record<string, unknown>
+): void {
+  if (res.headersSent) return;
+  const code =
+    Number.isFinite(status) && status >= 100 && status < 600 ? status : 500;
+  const payload = JSON.stringify(body);
+  res.status(code);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Length", Buffer.byteLength(payload, "utf8"));
+  res.end(payload);
+}
+
+function jsonErrorHandler(
+  err: unknown,
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  if (res.headersSent) {
+    return next(err);
+  }
+  console.error("api-error", err);
+  const statusFromErr =
+    typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    typeof (err as { status: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : typeof err === "object" &&
+          err !== null &&
+          "statusCode" in err &&
+          typeof (err as { statusCode: unknown }).statusCode === "number"
+        ? (err as { statusCode: number }).statusCode
+        : err instanceof SyntaxError
+          ? 400
+          : 500;
+  const code =
+    statusFromErr >= 400 && statusFromErr < 600 ? statusFromErr : 500;
+  sendJson(res, code, { error: safeErrMessage(err) });
+}
 
 async function startServer() {
   const app = express();
@@ -115,54 +177,58 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/ai/transcribe", upload.single("file"), async (req, res) => {
-    try {
-      if (!req.file?.buffer) {
-        return res.status(400).json({ error: "Missing file" });
-      }
-      const apiKey = process.env.GEMINI_API_KEY?.trim();
-      if (!apiKey) {
-        return res.status(500).json({
-          error:
-            "GEMINI_API_KEY nqsa 3la server. Zid GEMINI_API_KEY f .env w 3awd demmar npm run dev.",
-        });
-      }
-      const mimeType =
-        req.file.mimetype && req.file.mimetype !== ""
-          ? req.file.mimetype
-          : "application/octet-stream";
-      const { text } = await runGeminiTranscription(
-        req.file.buffer,
-        mimeType,
-        {
-          apiKey,
-          model: process.env.GEMINI_TRANSCRIPTION_MODEL,
+  app.post(
+    "/api/ai/transcribe",
+    upload.single("file"),
+    wrapAsync(async (req, res) => {
+      try {
+        if (!req.file?.buffer) {
+          return sendJson(res, 400, { error: "Missing file" });
         }
-      );
-      res.json({ text });
-    } catch (e) {
-      console.error("transcribe", e);
-      const msg = e instanceof Error ? e.message : String(e);
-      const status = msg.includes("kbir") ? 400 : 500;
-      res.status(status).json({ error: msg.slice(0, 600) });
-    }
-  });
+        const apiKey = process.env.GEMINI_API_KEY?.trim();
+        if (!apiKey) {
+          return sendJson(res, 500, {
+            error:
+              "GEMINI_API_KEY nqsa 3la server. Zid GEMINI_API_KEY f .env w 3awd demmar npm run dev.",
+          });
+        }
+        const mimeType =
+          req.file.mimetype && req.file.mimetype !== ""
+            ? req.file.mimetype
+            : "application/octet-stream";
+        const { text } = await runGeminiTranscription(
+          req.file.buffer,
+          mimeType,
+          {
+            apiKey,
+            model: process.env.GEMINI_TRANSCRIPTION_MODEL,
+          }
+        );
+        sendJson(res, 200, { text });
+      } catch (e) {
+        console.error("transcribe", e);
+        const msg = safeErrMessage(e);
+        const status = msg.includes("kbir") ? 400 : 500;
+        sendJson(res, status, { error: msg.slice(0, 600) });
+      }
+    })
+  );
 
   app.post(
     "/api/ai/chat",
     express.json({ limit: "4mb" }),
-    async (req, res) => {
+    wrapAsync(async (req, res) => {
       try {
         const { messages, temperature } = req.body as {
           messages?: unknown;
           temperature?: unknown;
         };
         if (!Array.isArray(messages) || messages.length === 0) {
-          return res.status(400).json({ error: "messages (array) required" });
+          return sendJson(res, 400, { error: "messages (array) required" });
         }
         const apiKey = process.env.OPENAI_API_KEY?.trim();
         if (!apiKey) {
-          return res.status(500).json({
+          return sendJson(res, 500, {
             error:
               "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
           });
@@ -175,20 +241,89 @@ async function startServer() {
             model: process.env.OPENAI_CHAT_MODEL,
           }
         );
-        res.json({ text: content });
+        sendJson(res, 200, { text: content });
       } catch (e) {
         console.error("chat", e);
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = safeErrMessage(e);
         const httpStatus =
           e instanceof Error && "httpStatus" in e
             ? (e as Error & { httpStatus?: number }).httpStatus
             : undefined;
-        res
-          .status(typeof httpStatus === "number" ? httpStatus : 500)
-          .json({ error: msg.slice(0, 600) });
+        sendJson(res, typeof httpStatus === "number" ? httpStatus : 500, {
+          error: msg.slice(0, 600),
+        });
       }
-    }
+    })
   );
+
+  app.post(
+    "/api/ai/veo-scene-analyze",
+    express.json({ limit: "4mb" }),
+    wrapAsync(async (req, res) => {
+      try {
+        const apiKey = process.env.OPENAI_API_KEY?.trim();
+        if (!apiKey) {
+          return sendJson(res, 500, {
+            error:
+              "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
+          });
+        }
+        const visionModel = process.env.OPENAI_VEO_VISION_MODEL?.trim();
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const result = await runVeoSceneAnalyze(body, { apiKey, visionModel });
+        if (result.ok === false) {
+          return sendJson(res, result.status, { error: result.error });
+        }
+        return sendJson(res, 200, { analysis: result.analysis });
+      } catch (e) {
+        console.error("veo-scene-analyze", e);
+        sendJson(res, 500, { error: safeErrMessage(e) });
+      }
+    })
+  );
+
+  app.post(
+    "/api/ai/veo-scene-package",
+    express.json({ limit: "12mb" }),
+    wrapAsync(async (req, res) => {
+      try {
+        const apiKey = process.env.OPENAI_API_KEY?.trim();
+        if (!apiKey) {
+          return sendJson(res, 500, {
+            error:
+              "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
+          });
+        }
+        const model =
+          process.env.OPENAI_VEO_SCENE_MODEL?.trim() ||
+          process.env.OPENAI_CHAT_MODEL?.trim() ||
+          "gpt-4o-mini";
+        const visionModel = process.env.OPENAI_VEO_VISION_MODEL?.trim();
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const result = await runVeoScenePackage(body, { apiKey, model, visionModel });
+        if (result.ok === false) {
+          return sendJson(res, result.status, { error: result.error });
+        }
+        const payload: Record<string, unknown> = {
+          analysis: result.analysis,
+          scenePackage: result.scenePackage,
+        };
+        if (result.rawPackageText !== undefined) {
+          payload.rawPackageText = result.rawPackageText;
+        }
+        if (result.parseError !== undefined) {
+          payload.parseError = result.parseError;
+        }
+        return sendJson(res, 200, payload);
+      } catch (e) {
+        console.error("veo-scene-package", e);
+        sendJson(res, 500, { error: safeErrMessage(e) });
+      }
+    })
+  );
+
+  // JSON errors from body-parser + any `next(err)` from routes above must run BEFORE Vite (otherwise Vite can answer with text/plain).
+  app.use(jsonErrorHandler);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {

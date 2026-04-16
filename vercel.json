@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/ai/veo-scene-analyze.ts": {
+      "maxDuration": 120
+    },
+    "api/ai/veo-scene-package.ts": {
+      "maxDuration": 120
+    }
+  }
+}
