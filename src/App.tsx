@@ -1319,6 +1319,271 @@ function veoInAppFromHistoryData(data: unknown): Record<string, unknown> | null 
   };
 }
 
+function historyItemHasVeoPackage(item: WebhookHistoryItem): boolean {
+  return veoInAppFromHistoryData(item.data) != null;
+}
+
+type NormalizedScreenLine = { text: string; role?: string; approxTimingSec?: string };
+
+/** Supports legacy string[] or { text, role, approxTimingSec } objects from Veo JSON. */
+function normalizeTextOnScreenLines(raw: unknown): NormalizedScreenLine[] {
+  if (!Array.isArray(raw)) return [];
+  const out: NormalizedScreenLine[] = [];
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const t = item.trim();
+      if (t) out.push({ text: t });
+    } else if (item && typeof item === "object") {
+      const o = item as Record<string, unknown>;
+      const text = typeof o.text === "string" ? o.text.trim() : "";
+      if (!text) continue;
+      const role = typeof o.role === "string" ? o.role.trim() : undefined;
+      const approxTimingSec =
+        typeof o.approxTimingSec === "string"
+          ? o.approxTimingSec.trim()
+          : typeof o.timingHint === "string"
+            ? o.timingHint.trim()
+            : undefined;
+      out.push({ text, role, approxTimingSec });
+    }
+  }
+  return out;
+}
+
+/** Prefer packaging shot, else model ref. */
+function productVisualRef(p: Pick<Product, "productImageUrl" | "modelImageUrl">): string | undefined {
+  const a = p.productImageUrl?.trim();
+  if (a) return a;
+  const b = p.modelImageUrl?.trim();
+  return b || undefined;
+}
+
+function ProductThumb({
+  url,
+  alt,
+  size = "md",
+  className,
+}: {
+  url?: string | null;
+  alt?: string;
+  size?: "sm" | "md" | "lg";
+  className?: string;
+}) {
+  const dim =
+    size === "sm" ? "w-9 h-9" : size === "lg" ? "w-14 h-14 min-w-[3.5rem] min-h-[3.5rem]" : "w-11 h-11 min-w-[2.75rem] min-h-[2.75rem]";
+  if (url && /^https?:\/\//i.test(url.trim())) {
+    return (
+      <img
+        src={url.trim()}
+        alt={alt || ""}
+        className={cn(`${dim} rounded-lg object-cover border border-gray-200 bg-white shrink-0`, className)}
+      />
+    );
+  }
+  return (
+    <div
+      className={cn(
+        `${dim} rounded-lg border border-dashed border-gray-200 bg-gray-50 shrink-0 flex items-center justify-center text-[10px] text-gray-400 font-medium`,
+        className
+      )}
+      title={alt}
+    >
+      ?
+    </div>
+  );
+}
+
+type WebhookHistoryProductSection =
+  | { kind: "product"; product: Product; items: WebhookHistoryItem[] }
+  | { kind: "orphan"; label: string; items: WebhookHistoryItem[] };
+
+function buildWebhookHistoryProductSections(
+  products: Product[],
+  webhookHistory: WebhookHistoryItem[]
+): WebhookHistoryProductSection[] {
+  const productIds = new Set(products.map((p) => p.id));
+  const byProduct = new Map<string, WebhookHistoryItem[]>();
+  const orphans: WebhookHistoryItem[] = [];
+  for (const item of webhookHistory) {
+    const pid = item.productId;
+    if (pid && productIds.has(pid)) {
+      const arr = byProduct.get(pid);
+      if (arr) arr.push(item);
+      else byProduct.set(pid, [item]);
+    } else {
+      orphans.push(item);
+    }
+  }
+  const sortDesc = (a: WebhookHistoryItem, b: WebhookHistoryItem) =>
+    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+  for (const arr of byProduct.values()) arr.sort(sortDesc);
+  orphans.sort(sortDesc);
+
+  const sections: WebhookHistoryProductSection[] = products.map((p) => ({
+    kind: "product" as const,
+    product: p,
+    items: byProduct.get(p.id) ?? [],
+  }));
+  if (orphans.length > 0) {
+    sections.push({
+      kind: "orphan",
+      label: "Ma m-rbout b produit",
+      items: orphans,
+    });
+  }
+  return sections;
+}
+
+function WebhookHistorySidebarGrouped({
+  sections,
+  products,
+  selectedHistoryId,
+  onSelect,
+  onRename,
+  onDelete,
+  subtitle,
+}: {
+  sections: WebhookHistoryProductSection[];
+  products: Product[];
+  selectedHistoryId: string | null;
+  onSelect: (item: WebhookHistoryItem) => void;
+  onRename: (id: string, e: React.MouseEvent) => void;
+  onDelete: (id: string, e: React.MouseEvent) => void;
+  subtitle?: string | null;
+}) {
+  return (
+    <div className="space-y-2">
+      <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+        <History className="w-5 h-5 text-orange-500" />
+        Sijil (by produit)
+      </h3>
+      {subtitle ? <p className="text-xs text-gray-500">{subtitle}</p> : null}
+      <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
+        <div className="max-h-[600px] overflow-y-auto">
+          {sections.map((section) => {
+            const veoCount = section.items.filter(historyItemHasVeoPackage).length;
+            const title =
+              section.kind === "product" ? section.product.name : section.label;
+            const thumbUrl =
+              section.kind === "product" ? productVisualRef(section.product) : null;
+            return (
+              <details key={section.kind === "product" ? section.product.id : "orphan"} className="group border-b border-gray-100 last:border-b-0" open>
+                <summary className="list-none cursor-pointer px-3 py-2.5 bg-gray-50/90 hover:bg-orange-50/60 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                  <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
+                  {section.kind === "product" ? (
+                    <ProductThumb url={thumbUrl} alt={title} size="sm" />
+                  ) : (
+                    <div className="w-9 h-9 rounded-lg bg-stone-100 border border-stone-200 flex items-center justify-center shrink-0">
+                      <Package className="w-4 h-4 text-stone-500" />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="text-sm font-semibold text-gray-800 truncate">{title}</div>
+                    <div className="text-[10px] text-gray-500">
+                      {section.items.length} f s-sijil · Veo: {veoCount} / {section.items.length}
+                      {section.items.length === 0 ? " · zid mn Video" : ""}
+                    </div>
+                  </div>
+                </summary>
+                <div className="bg-white">
+                  {section.items.length === 0 ? (
+                    <p className="text-[11px] text-gray-400 px-4 py-3 border-t border-gray-50">
+                      Mazal ma-kayn hta video mrbouta b had l-produit.
+                    </p>
+                  ) : (
+                    section.items.map((item) => {
+                      const hasVeo = historyItemHasVeoPackage(item);
+                      const prod =
+                        item.productId != null
+                          ? products.find((pr) => pr.id === item.productId)
+                          : undefined;
+                      const rowThumb = prod ? productVisualRef(prod) : undefined;
+                      const displayTitle = item.name?.trim() || prod?.name || "Natija";
+                      return (
+                        <div
+                          key={item.id}
+                          className={cn(
+                            "border-t border-gray-50 hover:bg-orange-50/40 transition-colors relative group",
+                            selectedHistoryId === item.id ? "bg-orange-50 border-l-4 border-l-orange-500" : ""
+                          )}
+                        >
+                          <button type="button" className="w-full text-left px-3 py-2.5 pr-10" onClick={() => onSelect(item)}>
+                            <div className="flex gap-2 items-start">
+                              <ProductThumb url={rowThumb} alt="" size="sm" className="mt-0.5" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
+                                  <span className="text-xs font-bold text-gray-800 truncate">
+                                    {displayTitle}
+                                  </span>
+                                  {item.sentToWebhook && (
+                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-green-100 text-green-700 text-[9px] font-medium shrink-0">
+                                      <CheckCircle className="w-2.5 h-2.5" /> Webhook
+                                    </span>
+                                  )}
+                                  {item.videoUrl ? (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium shrink-0">
+                                      Video
+                                    </span>
+                                  ) : null}
+                                  {hasVeo ? (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium shrink-0">
+                                      Veo ✓
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 font-medium shrink-0">
+                                      Mazal Veo
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex justify-between items-center gap-2">
+                                  <span className="text-[10px] text-gray-500">
+                                    {new Date(item.timestamp).toLocaleString("fr-FR", {
+                                      day: "2-digit",
+                                      month: "2-digit",
+                                      year: "numeric",
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                  <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1 py-0.5 rounded border border-gray-200 shrink-0">
+                                    #{item.id.slice(-5)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </button>
+                          <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              type="button"
+                              onClick={(e) => onRename(item.id, e)}
+                              className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-md transition-colors"
+                              title="Bddel Smiya"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => onDelete(item.id, e)}
+                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                              title="Mse7"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const REFERENCE_IMAGE_HISTORY_LS_KEY = "referenceImageHistoryV1";
 const REFERENCE_IMAGE_HISTORY_MAX = 80;
 
@@ -1382,13 +1647,11 @@ function buildReferenceImagePickOptions(
   return out;
 }
 
-type ReferenceImagePickerSlot =
-  | "model"
-  | "product"
-  | "background"
-  | "savedModel"
-  | "savedProduct"
-  | "savedBackground";
+type ImagePickerTarget =
+  | { kind: "generateRef"; field: "model" | "product" | "background" }
+  | { kind: "savedScriptRef"; field: "model" | "product" | "background" }
+  | { kind: "newProductRef"; field: "model" | "product" }
+  | { kind: "productCardRef"; productId: string; field: "model" | "product" };
 
 export default function App() {
   const workspaceDraft = useMemo(() => {
@@ -1423,6 +1686,11 @@ export default function App() {
   const [newProductName, setNewProductName] = useState('');
   const [newProductDesc, setNewProductDesc] = useState('');
   const [newProductScriptDetails, setNewProductScriptDetails] = useState('');
+  const [newProductModelImageUrl, setNewProductModelImageUrl] = useState<string | null>(null);
+  const [newProductProductImageUrl, setNewProductProductImageUrl] = useState<string | null>(null);
+  const [isUploadingNewProductModel, setIsUploadingNewProductModel] = useState(false);
+  const [isUploadingNewProductProduct, setIsUploadingNewProductProduct] = useState(false);
+  const [productRefUploadKey, setProductRefUploadKey] = useState<string | null>(null);
   
   // Generation State
   const [selectedProductId, setSelectedProductId] = useState<string>(
@@ -1521,13 +1789,13 @@ export default function App() {
   const [savedScriptBackgroundImageUrl, setSavedScriptBackgroundImageUrl] = useState<string | null>(null);
   const [isUploadingSavedBackground, setIsUploadingSavedBackground] = useState(false);
 
-  const [referenceImagePicker, setReferenceImagePicker] = useState<ReferenceImagePickerSlot | null>(null);
+  const [referenceImagePicker, setReferenceImagePicker] = useState<ImagePickerTarget | null>(null);
   const [referenceHistoryTick, setReferenceHistoryTick] = useState(0);
 
   const referenceImagePickOptions = useMemo(() => {
     void referenceHistoryTick;
     const historyUrls = loadReferenceImageHistoryFromLs();
-    return buildReferenceImagePickOptions(
+    const base = buildReferenceImagePickOptions(
       products,
       {
         model: modelImageUrl,
@@ -1541,6 +1809,17 @@ export default function App() {
       },
       historyUrls
     );
+    const seen = new Set(base.map((o) => o.url));
+    const extra: { url: string; label: string }[] = [];
+    const add = (url: string | null | undefined, label: string) => {
+      const v = typeof url === "string" ? url.trim() : "";
+      if (!/^https?:\/\//i.test(v) || seen.has(v)) return;
+      seen.add(v);
+      extra.push({ url: v, label });
+    };
+    add(newProductModelImageUrl, "Modal · model (jdid)");
+    add(newProductProductImageUrl, "Modal · produit (jdid)");
+    return [...extra, ...base];
   }, [
     referenceHistoryTick,
     products,
@@ -1550,35 +1829,77 @@ export default function App() {
     savedScriptModelImageUrl,
     savedScriptProductImageUrl,
     savedScriptBackgroundImageUrl,
+    newProductModelImageUrl,
+    newProductProductImageUrl,
   ]);
 
-  const applyReferenceImagePick = (slot: ReferenceImagePickerSlot, url: string) => {
+  const webhookHistoryProductSections = useMemo(
+    () => buildWebhookHistoryProductSections(products, webhookHistory),
+    [products, webhookHistory]
+  );
+
+  const selectedHistoryProduct = useMemo(() => {
+    if (!selectedHistoryId) return null;
+    const item = webhookHistory.find((h) => h.id === selectedHistoryId);
+    if (!item?.productId) return null;
+    return products.find((p) => p.id === item.productId) ?? null;
+  }, [selectedHistoryId, webhookHistory, products]);
+
+  const generateSelectedProductPreview = useMemo(() => {
+    if (!selectedProductId || selectedProductId === "all") return null;
+    return products.find((x) => x.id === selectedProductId) ?? null;
+  }, [selectedProductId, products]);
+
+  const applyReferenceImagePick = async (target: ImagePickerTarget, url: string) => {
     const u = url.trim();
     if (!u) return;
-    switch (slot) {
-      case "model":
-        setModelImageUrl(u);
-        setModelImageFile(null);
+    if (target.kind === "productCardRef") {
+      if (!user) return;
+      const col = target.field === "model" ? "model_image_url" : "product_image_url";
+      try {
+        const { error } = await supabase
+          .from("products")
+          .update({ [col]: u })
+          .eq("id", target.productId)
+          .eq("owner_id", user.id);
+        if (error) throw error;
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
+        await refreshUserData(user.id);
+      } catch (err) {
+        handleDbError(err, OperationType.UPDATE, "products");
+      }
+      setReferenceImagePicker(null);
+      return;
+    }
+    switch (target.kind) {
+      case "generateRef":
+        if (target.field === "model") {
+          setModelImageUrl(u);
+          setModelImageFile(null);
+        } else if (target.field === "product") {
+          setProductImageUrl(u);
+          setProductImageFile(null);
+        } else {
+          setBackgroundImageUrl(u);
+          setBackgroundImageFile(null);
+        }
         break;
-      case "product":
-        setProductImageUrl(u);
-        setProductImageFile(null);
+      case "savedScriptRef":
+        if (target.field === "model") {
+          setSavedScriptModelImageUrl(u);
+          setSavedScriptModelImageFile(null);
+        } else if (target.field === "product") {
+          setSavedScriptProductImageUrl(u);
+          setSavedScriptProductImageFile(null);
+        } else {
+          setSavedScriptBackgroundImageUrl(u);
+          setSavedScriptBackgroundImageFile(null);
+        }
         break;
-      case "background":
-        setBackgroundImageUrl(u);
-        setBackgroundImageFile(null);
-        break;
-      case "savedModel":
-        setSavedScriptModelImageUrl(u);
-        setSavedScriptModelImageFile(null);
-        break;
-      case "savedProduct":
-        setSavedScriptProductImageUrl(u);
-        setSavedScriptProductImageFile(null);
-        break;
-      case "savedBackground":
-        setSavedScriptBackgroundImageUrl(u);
-        setSavedScriptBackgroundImageFile(null);
+      case "newProductRef":
+        if (target.field === "model") setNewProductModelImageUrl(u);
+        else setNewProductProductImageUrl(u);
         break;
       default:
         break;
@@ -1870,6 +2191,26 @@ export default function App() {
     }
   }, []);
 
+  const openWebhookHistoryEntry = useCallback((item: WebhookHistoryItem) => {
+    setSelectedHistoryId(item.id);
+    if (item.videoUrl) {
+      setGeneratedVideoUrl(item.videoUrl);
+      setWebhookResponseData(null);
+      setWebhookResponseText(null);
+      setVeoResponseData(null);
+    } else if (item.data) {
+      setWebhookResponseData(item.data);
+      setVeoResponseData(veoInAppFromHistoryData(item.data));
+      setWebhookResponseText(null);
+      setGeneratedVideoUrl(null);
+    } else if (item.rawText) {
+      setWebhookResponseText(item.rawText);
+      setWebhookResponseData(null);
+      setVeoResponseData(null);
+      setGeneratedVideoUrl(null);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -2050,10 +2391,13 @@ export default function App() {
   const addProduct = async (
     name: string,
     description: string,
-    scriptDetails: string
+    scriptDetails: string,
+    imageOpts?: { modelImageUrl?: string | null; productImageUrl?: string | null }
   ) => {
     if (!user) return;
     try {
+      const m = imageOpts?.modelImageUrl?.trim();
+      const pr = imageOpts?.productImageUrl?.trim();
       const { data, error } = await supabase
         .from("products")
         .insert({
@@ -2061,6 +2405,8 @@ export default function App() {
           description,
           script_details: scriptDetails,
           owner_id: user.id,
+          ...(m && /^https?:\/\//i.test(m) ? { model_image_url: m } : {}),
+          ...(pr && /^https?:\/\//i.test(pr) ? { product_image_url: pr } : {}),
         })
         .select("id")
         .single();
@@ -2590,12 +2936,12 @@ TASK — Output ONLY markdown in English (French only if the voice script is cle
 ## Model
 ONE cohesive block (one or two dense paragraphs ONLY) — a single string the user will paste once into an image AI. It MUST instruct the generator to produce exactly ONE image file that is visually SPLIT into FOUR equal parts (a 2×2 layout: top-left, top-right, bottom-left, bottom-right — like a contact sheet or quad-split / four-quadrant composition inside a single frame). Use explicit wording image models understand, e.g. "single image divided into four equal quadrants", "four-panel grid in one picture", "one photograph split into 4 sections". The SAME identical photorealistic person must appear in all four quadrants (strict face, hair/hijab continuity, same outfit in every quadrant).
 
-OUTFIT — Must feel intentional and creator-ready, NOT generic "plain t-shirt only." Specify a rich, tasteful look: layered pieces or structured silhouette, interesting texture and color story (e.g. ribbed knit + tailored layer, quality loungewear set, modest fashion with fabric drape detail, denim + soft knit, coordinated accessories like minimal jewelry or watch, hijab fabric and wrap style if applicable). Makeup: soft camera-ready but still authentic; nails and grooming subtle. The outfit should match the product category mood (wellness, beauty, lifestyle) without looking like a catalog stock photo.
+OUTFIT — Must be derived from the actual script context (voice script + creative idea + product details), not random fashion. The clothing, styling, and vibe must logically fit what happens in the ad and who is speaking (e.g. practical beauty demo, home-care, wellness routine, lifestyle testimonial). Must feel intentional and creator-ready, NOT generic "plain t-shirt only." Specify a rich, tasteful look: layered pieces or structured silhouette, interesting texture and color story (e.g. ribbed knit + tailored layer, quality loungewear set, modest fashion with fabric drape detail, denim + soft knit, coordinated accessories like minimal jewelry or watch, hijab fabric and wrap style if applicable). Makeup: soft camera-ready but still authentic; nails and grooming subtle. Never describe outfit details that conflict with the script tone or intended product use moment.
 
 CRITICAL — NO PRODUCT IN MODEL SHOTS: the talent must NOT hold, touch, or display any product, packaging, bottle, tube, jar, box, or brand object. Hands empty or natural gestures only (e.g. relaxed hands, adjusting hair, touching shoulder). Pure white seamless studio cyclorama in every quadrant (talent reference only — no room furniture). NO text, NO logos, NO watermarks; soft even key light + gentle fill; natural skin; respect Casting, SCRIPT_ACCENT, and forbidden lists. Describe each quadrant (QL1…QL4) for pose and expression only — matching the MOOD of the LOCKED VOICE SCRIPT. Do NOT use "### Angle" subheadings — one continuous paragraph under ## Model.
 
 ## Background
-ONE paragraph — empty environment plate for the ENTIRE ad (same room in every scene; not a white cyclorama, not a blank white wall as the whole frame). Describe ONE simple, believable real-world interior with MINIMAL props — calm and uncrowded (avoid shelves packed with objects, busy patterns, or “a lot going on”). Only what fits the product mood: a few honest surfaces (mirror, counter, soft wall color, one plant or towel if needed)— nothing that screams “studio,” “ring light,” “filming setup,” “content creator,” or branded lighting gear. Natural daylight mood, soft and realistic; shallow depth of field OK. Absolutely NO people, NO hands, NO faces, NO reflections of a person, NO lamps or gear aimed at “creator” aesthetics unless it is a normal household lamp in the corner. Brand-safe; respect forbidden term lists.
+ONE paragraph — realistic empty environment plate for the ENTIRE ad (same room in every scene; not a white cyclorama, not a blank white wall as the whole frame). The location must be directly relevant to what happens in the script and product use context (if script implies bathroom routine, use believable bathroom details; if kitchen/home context, use that context). Describe ONE simple, believable real-world interior with MINIMAL props — calm and uncrowded (avoid shelves packed with objects, busy patterns, or “a lot going on”). Hard rule: background plate must contain ZERO humans. Absolutely NO model, NO person, NO body parts, NO face, NO silhouette, NO reflection of any person in mirror/glass, NO human shadow, and NO mannequin. If any human is visible, the background prompt is invalid and must be regenerated. Keep it photorealistic and natural (real materials, real lighting), not CGI-looking, not surreal, not fantasy. Nothing that screams “studio,” “ring light,” “filming setup,” “content creator,” or branded lighting gear. Natural daylight mood, soft and realistic; shallow depth of field OK. Brand-safe; respect forbidden term lists.
 
 ALWAYS output BOTH "## Model" and "## Background" sections in full — never omit ## Background.
 
@@ -3613,6 +3959,80 @@ ${b.styleExamplesBlock}`;
     }
   };
 
+  const handleProductCardImageUpload = async (
+    productId: string,
+    field: "model" | "product",
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !user) return;
+    setProductRefUploadKey(`${productId}-${field}`);
+    try {
+      const res = await uploadFiles("imageUploader", { files: [file] });
+      if (res && res.length > 0) {
+        const u = res[0].url;
+        const col = field === "model" ? "model_image_url" : "product_image_url";
+        const { error } = await supabase
+          .from("products")
+          .update({ [col]: u })
+          .eq("id", productId)
+          .eq("owner_id", user.id);
+        if (error) throw error;
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
+        await refreshUserData(user.id);
+      }
+    } catch (err) {
+      console.error("Product ref upload failed:", err);
+      alert("Mouchkil f upload d tswira d l-produit");
+    } finally {
+      setProductRefUploadKey(null);
+    }
+  };
+
+  const handleNewProductModelImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setIsUploadingNewProductModel(true);
+    try {
+      const res = await uploadFiles("imageUploader", { files: [file] });
+      if (res && res.length > 0) {
+        const u = res[0].url;
+        setNewProductModelImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Mouchkil f upload d tswira d l-model");
+    } finally {
+      setIsUploadingNewProductModel(false);
+    }
+  };
+
+  const handleNewProductProductImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setIsUploadingNewProductProduct(true);
+    try {
+      const res = await uploadFiles("imageUploader", { files: [file] });
+      if (res && res.length > 0) {
+        const u = res[0].url;
+        setNewProductProductImageUrl(u);
+        pushReferenceImageHistoryToLs(u);
+        setReferenceHistoryTick((t) => t + 1);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Mouchkil f upload d tswira d l-produit");
+    } finally {
+      setIsUploadingNewProductProduct(false);
+    }
+  };
+
   const sendSavedScriptToWebhook = async () => {
     if (!webhookUrl || !scriptToSend) return;
     if (!user) return;
@@ -4098,6 +4518,7 @@ ${b.styleExamplesBlock}`;
                       <button type="button" className="p-1 bg-white rounded-full shadow-sm border border-gray-200 text-gray-500 shrink-0">
                         {expandedProducts[p.id] ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
                       </button>
+                      <ProductThumb url={productVisualRef(p)} alt={p.name} size="lg" className="shadow-sm" />
                       <div className="min-w-0">
                         <h3 className="font-bold text-lg sm:text-xl truncate">{p.name}</h3>
                         <p className="text-gray-500 text-sm line-clamp-2">{p.description}</p>
@@ -4130,6 +4551,86 @@ ${b.styleExamplesBlock}`;
 
                   {expandedProducts[p.id] && (
                     <div className="p-6">
+                      <div className="mb-6 pb-6 border-b border-gray-100">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">
+                          Tsawer l-produit (packaging / refs)
+                        </h4>
+                        <p className="text-xs text-gray-500 mb-4">
+                          Kayt-sauvegardiw f Supabase o kaybano f liste Veo/Video o Generate bach t-organizi.
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <span className="text-xs font-semibold text-gray-600">Model ref</span>
+                            <div className="flex items-stretch gap-2">
+                              <label className="flex-1 min-h-[2.75rem] cursor-pointer border border-dashed border-gray-200 rounded-xl px-3 py-2 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  id={`product-model-${p.id}`}
+                                  onChange={(e) => void handleProductCardImageUpload(p.id, "model", e)}
+                                  disabled={productRefUploadKey === `${p.id}-model`}
+                                />
+                                {productRefUploadKey === `${p.id}-model` ? (
+                                  <Loader2 className="w-4 h-4 text-orange-500 animate-spin" />
+                                ) : (
+                                  <Upload className="w-4 h-4 text-gray-400" />
+                                )}
+                                <span className="text-xs text-gray-500 truncate">Upload</span>
+                              </label>
+                              <button
+                                type="button"
+                                title="Khtar men tsawer li deja uploditi"
+                                onClick={() =>
+                                  setReferenceImagePicker({ kind: "productCardRef", productId: p.id, field: "model" })
+                                }
+                                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
+                              >
+                                <Images className="w-4 h-4 shrink-0" />
+                                <span className="hidden sm:inline">Déjà</span>
+                              </button>
+                            </div>
+                            <div className="flex justify-start">
+                              <ProductThumb url={p.modelImageUrl} alt="Model" size="lg" />
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <span className="text-xs font-semibold text-gray-600">Tswira d l-produit</span>
+                            <div className="flex items-stretch gap-2">
+                              <label className="flex-1 min-h-[2.75rem] cursor-pointer border border-dashed border-gray-200 rounded-xl px-3 py-2 hover:bg-gray-50 transition-colors flex items-center justify-center gap-2">
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  id={`product-pack-${p.id}`}
+                                  onChange={(e) => void handleProductCardImageUpload(p.id, "product", e)}
+                                  disabled={productRefUploadKey === `${p.id}-product`}
+                                />
+                                {productRefUploadKey === `${p.id}-product` ? (
+                                  <Loader2 className="w-4 h-4 text-orange-500 animate-spin" />
+                                ) : (
+                                  <Upload className="w-4 h-4 text-gray-400" />
+                                )}
+                                <span className="text-xs text-gray-500 truncate">Upload</span>
+                              </label>
+                              <button
+                                type="button"
+                                title="Khtar men tsawer li deja uploditi"
+                                onClick={() =>
+                                  setReferenceImagePicker({ kind: "productCardRef", productId: p.id, field: "product" })
+                                }
+                                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
+                              >
+                                <Images className="w-4 h-4 shrink-0" />
+                                <span className="hidden sm:inline">Déjà</span>
+                              </button>
+                            </div>
+                            <div className="flex justify-start">
+                              <ProductThumb url={p.productImageUrl} alt="Product" size="lg" />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                       <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">Videos o Transcriptions</h4>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                       {/* Pending Videos */}
@@ -4293,6 +4794,23 @@ ${b.styleExamplesBlock}`;
                       <option value="all">Ga3 l-Produits (All Products)</option>
                       {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
+                    {generateSelectedProductPreview ? (
+                      <div className="mt-2 flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-3 py-2">
+                        <ProductThumb
+                          url={productVisualRef(generateSelectedProductPreview)}
+                          alt={generateSelectedProductPreview.name}
+                          size="md"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-gray-800 truncate">
+                            {generateSelectedProductPreview.name}
+                          </p>
+                          <p className="text-[10px] text-gray-500 truncate">
+                            Tsawer dial l-produit: kaybano f Veo/Video o hnaya.
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div>
@@ -4651,10 +5169,10 @@ ${b.styleExamplesBlock}`;
                             </div>
                           </div>
                           <p className="text-xs text-gray-500 mb-3">
-                            <strong>Model</strong>: fiche 4 druifat، tenue <strong>mzyana</strong>، fond byed studio،{" "}
-                            <strong>bla produit</strong> f yed. <strong>Background</strong>: pièce <strong>waqi3iya</strong>،{" "}
-                            <strong>machy</strong> m3ammra، <strong>machi</strong> fond byed، bla TikTok/ring light f
-                            prompt — <strong>bla</strong> bnadem، nafs blasa f ga3 l-machahid.
+                            <strong>Model</strong>: fiche 4 druifat، tenue <strong>mertabta b script</strong>، fond byed studio،{" "}
+                            <strong>bla produit</strong> f yed. <strong>Background</strong>: pièce <strong>waqi3iya</strong> مرتبطة{" "}
+                            b script / product context، <strong>machy</strong> m3ammra، <strong>machi</strong> fond byed، bla TikTok/ring
+                            light f prompt — <strong>mamnou3</strong> ay model/bnadem (7ta reflection/silhouette) w nafs blasa f ga3 l-machahid.
                           </p>
                           {modelImagePrompt != null && backgroundPromptOnly != null ? (
                             <div className="space-y-4">
@@ -4766,7 +5284,7 @@ ${b.styleExamplesBlock}`;
                             <button
                               type="button"
                               title="Khtar men tsawer li deja uploditi"
-                              onClick={() => setReferenceImagePicker("model")}
+                              onClick={() => setReferenceImagePicker({ kind: "generateRef", field: "model" })}
                               className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
                             >
                               <Images className="w-4 h-4 shrink-0" />
@@ -4789,7 +5307,7 @@ ${b.styleExamplesBlock}`;
                             <button
                               type="button"
                               title="Khtar men tsawer li deja uploditi"
-                              onClick={() => setReferenceImagePicker("product")}
+                              onClick={() => setReferenceImagePicker({ kind: "generateRef", field: "product" })}
                               className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
                             >
                               <Images className="w-4 h-4 shrink-0" />
@@ -4812,7 +5330,7 @@ ${b.styleExamplesBlock}`;
                             <button
                               type="button"
                               title="Khtar men tsawer li deja uploditi"
-                              onClick={() => setReferenceImagePicker("background")}
+                              onClick={() => setReferenceImagePicker({ kind: "generateRef", field: "background" })}
                               className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors"
                             >
                               <Images className="w-4 h-4 shrink-0" />
@@ -5081,99 +5599,39 @@ ${b.styleExamplesBlock}`;
           <div className="w-full flex flex-col md:flex-row gap-8">
             {/* Sidebar for History */}
             {webhookHistory.length > 0 && (
-              <div className="w-full md:w-64 flex-shrink-0 space-y-4">
-                <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <History className="w-5 h-5 text-orange-500" />
-                  Sijil (History)
-                </h3>
-                <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
-                  <div className="max-h-[600px] overflow-y-auto">
-                    {webhookHistory.map(item => (
-                      <div
-                        key={item.id}
-                        className={cn(
-                          "w-full text-left p-4 border-b border-gray-50 hover:bg-orange-50 transition-colors relative group",
-                          selectedHistoryId === item.id ? "bg-orange-50 border-l-4 border-l-orange-500" : ""
-                        )}
-                      >
-                        <button
-                          className="w-full text-left"
-                          onClick={() => {
-                            setSelectedHistoryId(item.id);
-                            if (item.videoUrl) {
-                              setGeneratedVideoUrl(item.videoUrl);
-                              setWebhookResponseData(null);
-                              setWebhookResponseText(null);
-                              setVeoResponseData(null);
-                            } else if (item.data) {
-                              setWebhookResponseData(item.data);
-                              setVeoResponseData(veoInAppFromHistoryData(item.data));
-                              setWebhookResponseText(null);
-                              setGeneratedVideoUrl(null);
-                            } else if (item.rawText) {
-                              setWebhookResponseText(item.rawText);
-                              setWebhookResponseData(null);
-                              setVeoResponseData(null);
-                              setGeneratedVideoUrl(null);
-                            }
-                          }}
-                        >
-                          <div className="flex justify-between items-start mb-1">
-                            <div className="text-sm font-bold text-gray-800 truncate pr-2 flex items-center gap-2">
-                              {item.name || (item.productId ? products.find(p => p.id === item.productId)?.name || 'Produit' : 'Natija')}
-                              {item.sentToWebhook && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-medium">
-                                  <CheckCircle className="w-3 h-3" /> Siftnah
-                                </span>
-                              )}
-                            </div>
-                            <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-md border border-gray-200 shrink-0">
-                              #{item.id.slice(-5)}
-                            </span>
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            {new Date(item.timestamp).toLocaleString('fr-FR', {
-                              day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
-                            })}
-                          </div>
-                        </button>
-                        
-                        {/* Actions overlay */}
-                        <div className="absolute right-2 bottom-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            onClick={(e) => renameHistoryItem(item.id, e)}
-                            className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-md transition-colors"
-                            title="Bddel Smiya"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={(e) => deleteHistoryItem(item.id, e)}
-                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
-                            title="Mse7"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="w-full md:w-72 flex-shrink-0">
+                <WebhookHistorySidebarGrouped
+                  sections={webhookHistoryProductSections}
+                  products={products}
+                  selectedHistoryId={selectedHistoryId}
+                  onSelect={openWebhookHistoryEntry}
+                  onRename={renameHistoryItem}
+                  onDelete={deleteHistoryItem}
+                  subtitle="Kol produit fih lista dyal videos: Veo ✓ ila t-generiti packages hna, sinon Mazal Veo."
+                />
               </div>
             )}
 
             {/* Main Content */}
             <div className="flex-1 space-y-8">
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold flex items-center gap-2">
-                  <Video className="w-6 h-6 text-orange-500" />
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <h2 className="text-2xl font-bold flex flex-wrap items-center gap-2">
+                  <Video className="w-6 h-6 text-orange-500 shrink-0" />
                   Natija dial l-Video (Ad Video)
                   {selectedHistoryId && (
-                    <span className="ml-2 text-sm font-mono bg-orange-100 text-orange-700 px-2.5 py-1 rounded-lg border border-orange-200">
+                    <span className="text-sm font-mono bg-orange-100 text-orange-700 px-2.5 py-1 rounded-lg border border-orange-200">
                       #{selectedHistoryId.slice(-5)}
                     </span>
                   )}
                 </h2>
+                {selectedHistoryProduct ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-gray-100 bg-white px-2.5 py-1.5 shadow-sm shrink-0">
+                    <ProductThumb url={productVisualRef(selectedHistoryProduct)} alt="" size="sm" />
+                    <span className="text-xs font-semibold text-gray-700 max-w-[200px] truncate">
+                      {selectedHistoryProduct.name}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {error && (
@@ -5509,107 +5967,34 @@ ${b.styleExamplesBlock}`;
         {activeTab === 'veoResult' && (
           <div className="w-full flex flex-col md:flex-row gap-8">
             {webhookHistory.length > 0 && (
-              <div className="w-full md:w-64 flex-shrink-0 space-y-2">
-                <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <History className="w-5 h-5 text-orange-500" />
-                  Sijil (videos)
-                </h3>
-                <p className="text-xs text-gray-500">
-                  Khtar video mn l-liste bach tchouf Veo (w script webhook) li m-rboutin b had sijil.
-                </p>
-                <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
-                  <div className="max-h-[560px] overflow-y-auto">
-                    {webhookHistory.map((item) => (
-                      <div
-                        key={item.id}
-                        className={cn(
-                          "w-full text-left p-4 border-b border-gray-50 hover:bg-orange-50 transition-colors relative group",
-                          selectedHistoryId === item.id ? "bg-orange-50 border-l-4 border-l-orange-500" : ""
-                        )}
-                      >
-                        <button
-                          type="button"
-                          className="w-full text-left"
-                          onClick={() => {
-                            setSelectedHistoryId(item.id);
-                            if (item.videoUrl) {
-                              setGeneratedVideoUrl(item.videoUrl);
-                              setWebhookResponseData(null);
-                              setWebhookResponseText(null);
-                              setVeoResponseData(null);
-                            } else if (item.data) {
-                              setWebhookResponseData(item.data);
-                              setVeoResponseData(veoInAppFromHistoryData(item.data));
-                              setWebhookResponseText(null);
-                              setGeneratedVideoUrl(null);
-                            } else if (item.rawText) {
-                              setWebhookResponseText(item.rawText);
-                              setWebhookResponseData(null);
-                              setVeoResponseData(null);
-                              setGeneratedVideoUrl(null);
-                            }
-                          }}
-                        >
-                          <div className="flex justify-between items-start mb-1">
-                            <div className="text-sm font-bold text-gray-800 truncate pr-2 flex items-center gap-2">
-                              {item.name ||
-                                (item.productId
-                                  ? products.find((p) => p.id === item.productId)?.name || "Produit"
-                                  : "Natija")}
-                              {item.sentToWebhook && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-medium">
-                                  <CheckCircle className="w-3 h-3" /> Siftnah
-                                </span>
-                              )}
-                            </div>
-                            <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-md border border-gray-200 shrink-0">
-                              #{item.id.slice(-5)}
-                            </span>
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            {new Date(item.timestamp).toLocaleString("fr-FR", {
-                              day: "2-digit",
-                              month: "2-digit",
-                              year: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
-                          </div>
-                        </button>
-                        <div className="absolute right-2 bottom-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button
-                            type="button"
-                            onClick={(e) => renameHistoryItem(item.id, e)}
-                            className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-md transition-colors"
-                            title="Bddel Smiya"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => deleteHistoryItem(item.id, e)}
-                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
-                            title="Mse7"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="w-full md:w-72 flex-shrink-0">
+                <WebhookHistorySidebarGrouped
+                  sections={webhookHistoryProductSections}
+                  products={products}
+                  selectedHistoryId={selectedHistoryId}
+                  onSelect={openWebhookHistoryEntry}
+                  onRename={renameHistoryItem}
+                  onDelete={deleteHistoryItem}
+                  subtitle="Nafs n-nizam: chof 3la kol produit ch7al Veo t-sauvegardaw w ch7al mazal."
+                />
               </div>
             )}
             <div className="flex-1 min-w-0 max-w-4xl mx-auto md:mx-0 space-y-8">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <h2 className="text-2xl font-bold flex items-center gap-2 flex-wrap">
-                <Sparkles className="w-6 h-6 text-orange-500" />
-                Veo Prompts (Natija d Tsawer)
+              <h2 className="text-2xl font-bold flex items-center gap-2 flex-wrap min-w-0">
+                <Sparkles className="w-6 h-6 text-orange-500 shrink-0" />
+                <span className="min-w-0">Veo Prompts (Natija d Tsawer)</span>
                 {selectedHistoryId && (
-                  <span className="ml-2 text-sm font-mono bg-orange-100 text-orange-700 px-2.5 py-1 rounded-lg border border-orange-200">
+                  <span className="text-sm font-mono bg-orange-100 text-orange-700 px-2.5 py-1 rounded-lg border border-orange-200 shrink-0">
                     #{selectedHistoryId.slice(-5)}
                   </span>
                 )}
+                {selectedHistoryProduct ? (
+                  <span className="inline-flex items-center gap-2 rounded-xl border border-gray-100 bg-white px-2 py-1 shadow-sm text-sm font-semibold text-gray-700 max-w-full">
+                    <ProductThumb url={productVisualRef(selectedHistoryProduct)} alt="" size="sm" />
+                    <span className="truncate max-w-[12rem] sm:max-w-xs">{selectedHistoryProduct.name}</span>
+                  </span>
+                ) : null}
               </h2>
               <button
                 type="button"
@@ -5688,58 +6073,62 @@ ${b.styleExamplesBlock}`;
                             ? findSceneImageUrl(sceneImages, selectedHistoryId, idx, "fin")
                             : null;
 
+                        const stillAside =
+                          selectedHistoryId != null ? (
+                            <aside className="grid grid-cols-2 gap-2 sm:gap-3 shrink-0 w-full max-w-[22rem] mx-auto sm:max-w-[24rem] md:w-[20.5rem] md:max-w-none md:mx-0 md:sticky md:top-3 self-start">
+                              <div className="min-w-0 text-center">
+                                <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
+                                  Debut
+                                </span>
+                                {debutPreview ? (
+                                  <img
+                                    src={debutPreview}
+                                    alt={`Scene ${sceneNo} debut`}
+                                    className="w-full aspect-[9/16] object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
+                                  />
+                                ) : (
+                                  <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center leading-tight">
+                                    Mazal ma-t-uploadiwch
+                                  </div>
+                                )}
+                              </div>
+                              <div className="min-w-0 text-center">
+                                <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
+                                  Fin
+                                </span>
+                                {finPreview ? (
+                                  <img
+                                    src={finPreview}
+                                    alt={`Scene ${sceneNo} fin`}
+                                    className="w-full aspect-[9/16] object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
+                                  />
+                                ) : (
+                                  <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center leading-tight">
+                                    Mazal ma-t-uploadiwch
+                                  </div>
+                                )}
+                              </div>
+                            </aside>
+                          ) : null;
+
                         return (
                           <div
                             key={String(scene.sceneNumber ?? scene.scene_number ?? idx)}
-                            className="bg-gray-50 rounded-xl p-6 border border-gray-200"
+                            className="bg-gray-50 rounded-xl p-4 sm:p-6 border border-gray-200"
                           >
-                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4 border-b border-gray-200 pb-4">
-                              <h3 className="font-bold text-lg text-gray-800 shrink-0">
+                            <div className="mb-4 border-b border-gray-200 pb-3">
+                              <h3 className="font-bold text-lg text-gray-800">
                                 Scene {sceneNo}
                                 {veoResponseData?.generatedInApp && (
                                   <span className="ml-2 text-xs font-normal text-gray-500">(VEO 3.1 — hna)</span>
                                 )}
                               </h3>
-                              {selectedHistoryId && (
-                                <div className="flex gap-3 shrink-0">
-                                  <div className="text-center">
-                                    <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
-                                      Debut
-                                    </span>
-                                    {debutPreview ? (
-                                      <img
-                                        src={debutPreview}
-                                        alt={`Scene ${sceneNo} debut`}
-                                        className="w-[4.5rem] h-28 sm:w-24 sm:h-32 object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
-                                      />
-                                    ) : (
-                                      <div className="w-[4.5rem] h-28 sm:w-24 sm:h-32 rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center">
-                                        Mazal ma-t-uploadiwch
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div className="text-center">
-                                    <span className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">
-                                      Fin
-                                    </span>
-                                    {finPreview ? (
-                                      <img
-                                        src={finPreview}
-                                        alt={`Scene ${sceneNo} fin`}
-                                        className="w-[4.5rem] h-28 sm:w-24 sm:h-32 object-cover rounded-lg border border-gray-200 bg-white shadow-sm"
-                                      />
-                                    ) : (
-                                      <div className="w-[4.5rem] h-28 sm:w-24 sm:h-32 rounded-lg border border-dashed border-gray-200 bg-gray-100/80 flex items-center justify-center text-[10px] text-gray-400 px-1 text-center">
-                                        Mazal ma-t-uploadiwch
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              )}
                             </div>
 
+                            <div className="flex flex-col-reverse md:flex-row md:items-start gap-4">
+                              <div className="flex-1 min-w-0 space-y-3 min-h-0">
                             {scene._parseError && (
-                              <div className="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-100 rounded-lg p-3">
+                              <div className="text-sm text-amber-800 bg-amber-50 border border-amber-100 rounded-lg p-3">
                                 JSON ma-t9rach: {scene._parseError}
                                 {scene._rawPackageText ? (
                                   <pre className="mt-2 text-xs whitespace-pre-wrap max-h-48 overflow-auto">
@@ -5750,7 +6139,7 @@ ${b.styleExamplesBlock}`;
                             )}
 
                             {typeof scene._imageAnalysis === "string" && scene._imageAnalysis.trim() && (
-                              <details className="mb-4 text-sm rounded-lg border border-gray-100 bg-white group">
+                              <details className="text-sm rounded-lg border border-gray-100 bg-white group">
                                 <summary className="cursor-pointer list-none px-3 py-2 font-medium text-gray-600 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
                                   <ChevronDown className="w-4 h-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
                                   Image analysis (debut → fin)
@@ -5760,6 +6149,113 @@ ${b.styleExamplesBlock}`;
                                 </pre>
                               </details>
                             )}
+
+                            {(() => {
+                              const tos = scene.textOnScreen;
+                              if (!hasVeo31 && (!tos || typeof tos !== "object")) return null;
+                              if (!tos || typeof tos !== "object") {
+                                return (
+                                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-950">
+                                    <span className="font-semibold">Text f screen</span> — ma-l9inach{" "}
+                                    <code className="text-[10px] bg-white/80 px-1 rounded">textOnScreen</code> — 3awd
+                                    &quot;Generi Veo&quot;.
+                                  </div>
+                                );
+                              }
+                              const allowed = tos.allowed === true;
+                              const rationale =
+                                typeof tos.rationale === "string" ? tos.rationale.trim() : "";
+                              const lines = normalizeTextOnScreenLines(tos.lines);
+                              const copyPayload = lines
+                                .map((L) =>
+                                  [L.text, L.role ? `(${L.role})` : "", L.approxTimingSec ? `@ ${L.approxTimingSec}` : ""]
+                                    .filter(Boolean)
+                                    .join(" ")
+                                )
+                                .join("\n");
+                              const lineCount = lines.length;
+                              return (
+                                <div className="flex gap-1.5 items-stretch">
+                                  <details className="flex-1 min-w-0 text-sm rounded-lg border border-teal-100 bg-white shadow-sm group">
+                                    <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-gray-700 flex items-center gap-2 [&::-webkit-details-marker]:hidden">
+                                      <ChevronDown className="w-4 h-4 shrink-0 text-teal-600/70 transition-transform group-open:rotate-180" />
+                                      <span className="text-xs font-bold text-teal-700 uppercase tracking-wider">
+                                        Text f l&apos;écran
+                                      </span>
+                                      <span
+                                        className={cn(
+                                          "text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full border ml-1",
+                                          allowed
+                                            ? "bg-teal-600 text-white border-teal-700"
+                                            : "bg-gray-100 text-gray-600 border-gray-200"
+                                        )}
+                                      >
+                                        {allowed ? "overlays" : "clean"}
+                                      </span>
+                                      <span className="text-[10px] font-normal text-gray-500 normal-case">
+                                        · {lineCount} ligne{lineCount !== 1 ? "s" : ""}
+                                      </span>
+                                    </summary>
+                                    <div className="px-3 pb-3 border-t border-teal-50/80 space-y-3">
+                                      <p className="text-[11px] text-teal-900/85 leading-snug pt-2">
+                                        CapCut / Reels — ma-tburniwch f Veo; negative prompt kib9a 7mi men subtitles
+                                        baked-in.
+                                      </p>
+                                      {rationale ? (
+                                        <p className="text-sm text-gray-800 leading-relaxed">{rationale}</p>
+                                      ) : null}
+                                      {lines.length > 0 ? (
+                                        <ul className="space-y-2">
+                                          {lines.map((line, li) => (
+                                            <li
+                                              key={li}
+                                              className="flex flex-col gap-1 rounded-lg border border-teal-100/80 bg-teal-50/30 px-3 py-2"
+                                            >
+                                              <p className="text-sm font-semibold text-gray-900 leading-snug">
+                                                &ldquo;{line.text}&rdquo;
+                                              </p>
+                                              <div className="flex flex-wrap gap-2 text-[10px] text-gray-600">
+                                                {line.role ? (
+                                                  <span className="px-1.5 py-0.5 rounded bg-white font-medium text-gray-700 border border-gray-100">
+                                                    {line.role}
+                                                  </span>
+                                                ) : null}
+                                                {line.approxTimingSec ? (
+                                                  <span className="px-1.5 py-0.5 rounded bg-teal-100/60 text-teal-900 font-medium">
+                                                    ~{line.approxTimingSec}
+                                                  </span>
+                                                ) : null}
+                                              </div>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      ) : allowed ? (
+                                        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                                          allowed=true walakin lines khawyin — 3awd generi had l-machhad.
+                                        </p>
+                                      ) : (
+                                        <p className="text-xs text-gray-600 italic">
+                                          Ma t-proposiw hta overlay — clip clean.
+                                        </p>
+                                      )}
+                                    </div>
+                                  </details>
+                                  {copyPayload ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        void navigator.clipboard.writeText(copyPayload);
+                                        alert("T-copia lines d text!");
+                                      }}
+                                      className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-teal-700 rounded-lg hover:bg-teal-50 border border-transparent hover:border-teal-100"
+                                      title="Copi kolchi"
+                                    >
+                                      <Copy className="w-4 h-4" />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              );
+                            })()}
 
                             {hasVeo31 ? (
                               <div className="space-y-3">
@@ -5870,6 +6366,9 @@ ${b.styleExamplesBlock}`;
                                 <pre className="mt-2 text-xs bg-white p-2 rounded border overflow-x-auto">{JSON.stringify(scene, null, 2)}</pre>
                               </div>
                             )}
+                              </div>
+                              {stillAside}
+                            </div>
                           </div>
                         );
                       })}
@@ -6115,13 +6614,13 @@ ${b.styleExamplesBlock}`;
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 overflow-y-auto max-h-[55vh] pr-1">
                 {referenceImagePickOptions.map(({ url, label }) => {
-                  const slot = referenceImagePicker;
-                  if (slot == null) return null;
+                  const target = referenceImagePicker;
+                  if (target == null) return null;
                   return (
                     <button
                       key={url}
                       type="button"
-                      onClick={() => applyReferenceImagePick(slot, url)}
+                      onClick={() => void applyReferenceImagePick(target, url)}
                       className="group text-left rounded-xl border border-gray-200 overflow-hidden hover:border-orange-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
                     >
                       <div className="aspect-square bg-gray-100">
@@ -6247,6 +6746,68 @@ ${b.styleExamplesBlock}`;
                   هادشي كيدخل تلقائياً فـ Generi Script ملي كتختار هاد المنتج.
                 </p>
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-gray-100">
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Model ref (khtiyari)</label>
+                  <div className="flex items-stretch gap-2">
+                    <label className="flex-1 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 flex items-center justify-center gap-2 hover:bg-gray-50 min-h-[3rem]">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => void handleNewProductModelImageUpload(e)}
+                        disabled={isUploadingNewProductModel}
+                      />
+                      {isUploadingNewProductModel ? (
+                        <Loader2 className="w-5 h-5 animate-spin text-orange-500" />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
+                      <span className="text-xs text-gray-500">Upload</span>
+                    </label>
+                    <button
+                      type="button"
+                      title="Khtar men déjà uploadé"
+                      onClick={() => setReferenceImagePicker({ kind: "newProductRef", field: "model" })}
+                      className="shrink-0 inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
+                    >
+                      <Images className="w-4 h-4" />
+                      <span className="hidden sm:block text-[10px]">Déjà</span>
+                    </button>
+                  </div>
+                  <ProductThumb url={newProductModelImageUrl} alt="" size="md" />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Tswira d l-produit (khtiyari)</label>
+                  <div className="flex items-stretch gap-2">
+                    <label className="flex-1 cursor-pointer border border-dashed border-gray-200 rounded-xl p-3 flex items-center justify-center gap-2 hover:bg-gray-50 min-h-[3rem]">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => void handleNewProductProductImageUpload(e)}
+                        disabled={isUploadingNewProductProduct}
+                      />
+                      {isUploadingNewProductProduct ? (
+                        <Loader2 className="w-5 h-5 animate-spin text-orange-500" />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
+                      <span className="text-xs text-gray-500">Upload</span>
+                    </label>
+                    <button
+                      type="button"
+                      title="Khtar men déjà uploadé"
+                      onClick={() => setReferenceImagePicker({ kind: "newProductRef", field: "product" })}
+                      className="shrink-0 inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
+                    >
+                      <Images className="w-4 h-4" />
+                      <span className="hidden sm:block text-[10px]">Déjà</span>
+                    </button>
+                  </div>
+                  <ProductThumb url={newProductProductImageUrl} alt="" size="md" />
+                </div>
+              </div>
             </div>
             <div className="flex gap-3 justify-end mt-6">
               <button 
@@ -6255,6 +6816,8 @@ ${b.styleExamplesBlock}`;
                   setNewProductName('');
                   setNewProductDesc('');
                   setNewProductScriptDetails('');
+                  setNewProductModelImageUrl(null);
+                  setNewProductProductImageUrl(null);
                 }}
                 className="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded-xl font-medium transition-colors"
               >
@@ -6263,15 +6826,16 @@ ${b.styleExamplesBlock}`;
               <button 
                 onClick={() => {
                   if (newProductName.trim()) {
-                    addProduct(
-                      newProductName.trim(),
-                      newProductDesc.trim(),
-                      newProductScriptDetails.trim()
-                    );
+                    addProduct(newProductName.trim(), newProductDesc.trim(), newProductScriptDetails.trim(), {
+                      modelImageUrl: newProductModelImageUrl,
+                      productImageUrl: newProductProductImageUrl,
+                    });
                     setIsAddProductModalOpen(false);
                     setNewProductName('');
                     setNewProductDesc('');
                     setNewProductScriptDetails('');
+                    setNewProductModelImageUrl(null);
+                    setNewProductProductImageUrl(null);
                   }
                 }}
                 disabled={!newProductName.trim()}
@@ -6330,7 +6894,7 @@ ${b.styleExamplesBlock}`;
                     <button
                       type="button"
                       title="Khtar men tsawer li deja uploditi"
-                      onClick={() => setReferenceImagePicker("savedModel")}
+                      onClick={() => setReferenceImagePicker({ kind: "savedScriptRef", field: "model" })}
                       className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
                     >
                       <Images className="w-4 h-4 shrink-0" />
@@ -6370,7 +6934,7 @@ ${b.styleExamplesBlock}`;
                     <button
                       type="button"
                       title="Khtar men tsawer li deja uploditi"
-                      onClick={() => setReferenceImagePicker("savedProduct")}
+                      onClick={() => setReferenceImagePicker({ kind: "savedScriptRef", field: "product" })}
                       className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
                     >
                       <Images className="w-4 h-4 shrink-0" />
@@ -6410,7 +6974,7 @@ ${b.styleExamplesBlock}`;
                     <button
                       type="button"
                       title="Khtar men tsawer li deja uploditi"
-                      onClick={() => setReferenceImagePicker("savedBackground")}
+                      onClick={() => setReferenceImagePicker({ kind: "savedScriptRef", field: "background" })}
                       className="shrink-0 self-center inline-flex flex-col items-center justify-center gap-0.5 px-2 py-2 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-xl transition-colors"
                     >
                       <Images className="w-4 h-4 shrink-0" />

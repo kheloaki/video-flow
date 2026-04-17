@@ -163,8 +163,17 @@ Scene extraction rules:
   - scene voiceover
   - whether the woman is speaking to camera
   - whether product is visible
-  - whether text on screen belongs only to editing
+  - whether short post-edit text overlays would help this scene (see textOnScreen rules)
 - Do not mix details from other scenes except if needed for continuity.
+
+TEXT ON SCREEN — post-production only (editor / copywriter; NOT burned into Veo):
+- You MUST always output a complete "textOnScreen" object.
+- Act as a senior UGC short-form copy editor: lines are for CapCut / Reels text stickers AFTER export. Do NOT instruct Veo to render this text inside the pixels; veoPrompt stays clean of baked captions (keep negativePrompt blocking subtitles).
+- Match script language in "lines[].text" (Darija Latin if script is Darija, etc.).
+- "allowed": true when 1–4 short overlays would help (hook, proof, price, urgence, CTA). false only when the scene should stay fully clean — explain in "rationale".
+- "rationale": 1–2 sentences on why these overlays fit the scene goal / beat.
+- "lines": if allowed is false, use exactly []. If allowed is true, use 1–4 objects with non-empty "text", "role" (hook|benefit|proof|price|urgency|cta|brand|question|social|other), optional "approxTimingSec" (e.g. "0-2.5s", "5-8s").
+- No fake prices or claims not in the script.
 
 Continuity rules:
 - Preserve the same woman identity.
@@ -191,7 +200,7 @@ Visual rules:
   - implied motion
   - environment continuity
   - realism risks
-- If the image analysis mentions text overlays in the reference images, do not generate subtitles, captions, or graphic text unless the selected scene clearly requires them as editable overlay elements.
+- Reference stills may contain incidental text: ignore it for Veo continuity unless the script asks to echo it; still propose fresh overlay copy in textOnScreen when allowed.
 
 Naturally include these constraints inside the final prompt and negative prompt:
 - no subtitles
@@ -231,6 +240,7 @@ Return exactly this JSON structure (fill every string field; booleans and number
   "voiceoverDarijaClearTTS": "",
   "textOnScreen": {
     "allowed": false,
+    "rationale": "",
     "lines": []
   },
   "speaker": {
