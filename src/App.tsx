@@ -32,8 +32,11 @@ import {
   Edit2,
   CheckCircle,
   Download,
-  Images
+  Images,
+  ArrowLeft,
 } from 'lucide-react';
+import CloneVideoWorkspace from "./CloneVideoWorkspace.tsx";
+import { ProductHub } from "./components/ProductHub.tsx";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Markdown from 'react-markdown';
@@ -1676,6 +1679,7 @@ export default function App() {
   const [videos, setVideos] = useState<VideoData[]>([]);
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   
+  const [productView, setProductView] = useState<"hub" | "flow" | "clone">("hub");
   const [activeTab, setActiveTab] = useState<
     "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
   >(() => workspaceDraft?.activeTab ?? "products");
@@ -1979,6 +1983,27 @@ export default function App() {
   }, [voiceScriptLanguage, voiceScriptLanguageOther, voiceAccent, voiceAccentOther, veoAvoidWords]);
 
   const [copied, setCopied] = useState(false);
+  const copyToastTimerRef = useRef<number | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const showCopyToast = useCallback((message: string) => {
+    setCopyToast(message);
+    if (copyToastTimerRef.current !== null) {
+      window.clearTimeout(copyToastTimerRef.current);
+    }
+    copyToastTimerRef.current = window.setTimeout(() => {
+      setCopyToast(null);
+      copyToastTimerRef.current = null;
+    }, 2600);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copyToastTimerRef.current !== null) {
+        window.clearTimeout(copyToastTimerRef.current);
+      }
+    };
+  }, []);
+
   /** Set when Supabase list queries fail — otherwise the UI looks “empty” with no explanation */
   const [dataSyncError, setDataSyncError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -4404,6 +4429,21 @@ ${b.styleExamplesBlock}`;
     );
   }
 
+  if (productView === "hub") {
+    return (
+      <ProductHub
+        userEmail={user.email}
+        onOpenFlow={() => setProductView("flow")}
+        onOpenClone={() => setProductView("clone")}
+        onLogout={() => void handleLogout()}
+      />
+    );
+  }
+
+  if (productView === "clone") {
+    return <CloneVideoWorkspace onBack={() => setProductView("hub")} />;
+  }
+
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-20">
       {authNotice && (
@@ -4443,6 +4483,14 @@ ${b.styleExamplesBlock}`;
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-3 sm:py-0 sm:h-auto sm:min-h-16 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center justify-between gap-2 min-w-0 sm:justify-start sm:shrink-0">
             <div className="flex items-center gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={() => setProductView("hub")}
+                className="p-2 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 shrink-0"
+                title="Accueil"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
               <div className="bg-orange-500 p-1.5 rounded-lg shrink-0">
                 <Sparkles className="w-5 h-5 text-white" />
               </div>
@@ -5030,9 +5078,14 @@ ${b.styleExamplesBlock}`;
                             ? `## 4. Script video (kamal)\n\n${generatedScript}`
                             : '';
                           const fullTextToCopy = `${ideaBlock}${voiceBlock}${visualBlock}${scriptBlock}${scenesText}`;
-                          navigator.clipboard.writeText(fullTextToCopy);
-                          setCopied(true);
-                          setTimeout(() => setCopied(false), 2000);
+                          void navigator.clipboard.writeText(fullTextToCopy).then(
+                            () => {
+                              setCopied(true);
+                              showCopyToast("T-copia kolchi!");
+                              window.setTimeout(() => setCopied(false), 2000);
+                            },
+                            () => showCopyToast("Ma-t9rachch l-copie.")
+                          );
                         }}
                         className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2 text-sm text-gray-600"
                       >
@@ -5056,8 +5109,10 @@ ${b.styleExamplesBlock}`;
                               <button
                                 type="button"
                                 onClick={() => {
-                                  navigator.clipboard.writeText(scriptIdea);
-                                  alert("T-copia l-fikra!");
+                                  void navigator.clipboard.writeText(scriptIdea).then(
+                                    () => showCopyToast("T-copia l-fikra!"),
+                                    () => showCopyToast("Ma-t9rachch l-copie.")
+                                  );
                                 }}
                                 className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
                               >
@@ -5092,8 +5147,10 @@ ${b.styleExamplesBlock}`;
                               <button
                                 type="button"
                                 onClick={() => {
-                                  navigator.clipboard.writeText(voiceOnlyScript);
-                                  alert("T-copia script swoti!");
+                                  void navigator.clipboard.writeText(voiceOnlyScript).then(
+                                    () => showCopyToast("T-copia script swoti!"),
+                                    () => showCopyToast("Ma-t9rachch l-copie.")
+                                  );
                                 }}
                                 className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
                               >
@@ -5141,8 +5198,10 @@ ${b.styleExamplesBlock}`;
                               <button
                                 type="button"
                                 onClick={() => {
-                                  navigator.clipboard.writeText(visualPromptsText);
-                                  alert("T-copia kolchi (markdown)!");
+                                  void navigator.clipboard.writeText(visualPromptsText).then(
+                                    () => showCopyToast("T-copia kolchi (markdown)!"),
+                                    () => showCopyToast("Ma-t9rachch l-copie.")
+                                  );
                                 }}
                                 className="text-sm text-orange-600 hover:text-orange-800 bg-orange-50 px-3 py-2 rounded-lg font-medium"
                               >
@@ -5184,8 +5243,10 @@ ${b.styleExamplesBlock}`;
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      navigator.clipboard.writeText(modelImagePrompt);
-                                      alert("T-copia prompt dial model!");
+                                      void navigator.clipboard.writeText(modelImagePrompt).then(
+                                        () => showCopyToast("T-copia prompt dial model!"),
+                                        () => showCopyToast("Ma-t9rachch l-copie.")
+                                      );
                                     }}
                                     className="text-xs text-orange-600 hover:text-orange-800 bg-orange-50 px-2.5 py-1.5 rounded-lg font-medium inline-flex items-center gap-1"
                                   >
@@ -5214,8 +5275,10 @@ ${b.styleExamplesBlock}`;
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      navigator.clipboard.writeText(backgroundPromptOnly);
-                                      alert("T-copia background!");
+                                      void navigator.clipboard.writeText(backgroundPromptOnly).then(
+                                        () => showCopyToast("T-copia background!"),
+                                        () => showCopyToast("Ma-t9rachch l-copie.")
+                                      );
                                     }}
                                     className="text-xs text-orange-600 hover:text-orange-800 bg-orange-50 px-2.5 py-1.5 rounded-lg font-medium inline-flex items-center gap-1"
                                   >
@@ -5358,8 +5421,10 @@ ${b.styleExamplesBlock}`;
                           <button 
                             type="button"
                             onClick={() => {
-                              navigator.clipboard.writeText(generatedScript);
-                              alert("T-copia Script!");
+                              void navigator.clipboard.writeText(generatedScript).then(
+                                () => showCopyToast("T-copia Script!"),
+                                () => showCopyToast("Ma-t9rachch l-copie.")
+                              );
                             }}
                             className="text-sm text-orange-600 hover:text-orange-800 hover:bg-orange-100 flex items-center justify-center gap-2 bg-orange-50 px-3 py-2 rounded-lg transition-colors font-medium w-full sm:w-auto"
                           >
@@ -5428,8 +5493,10 @@ ${b.styleExamplesBlock}`;
                               return `Scene ${s.sceneNumber || s.scene_number}:\nDebut${debutModelRef}${debutProductRef}${debutBackgroundRef}: ${s.debut?.prompt || s.debut}\nFin${finModelRef}${finProductRef}${finBackgroundRef}: ${s.fin?.prompt || s.fin}`;
                             }).join('\n\n') : '';
                             const fullTextToCopy = `${script.content}${scenesText}`;
-                            navigator.clipboard.writeText(fullTextToCopy);
-                            alert("T-copia kolchi!");
+                            void navigator.clipboard.writeText(fullTextToCopy).then(
+                              () => showCopyToast("T-copia kolchi!"),
+                              () => showCopyToast("Ma-t9rachch l-copie.")
+                            );
                           }}
                           className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
                           title="Copi Kolchi"
@@ -5483,8 +5550,12 @@ ${b.styleExamplesBlock}`;
                                   </div>
                                   <button 
                                     onClick={() => {
-                                      navigator.clipboard.writeText(scene.debut?.prompt || scene.debut);
-                                      alert("T-copia Debut!");
+                                      void navigator.clipboard
+                                        .writeText(String(scene.debut?.prompt ?? scene.debut ?? ""))
+                                        .then(
+                                          () => showCopyToast("T-copia Debut!"),
+                                          () => showCopyToast("Ma-t9rachch l-copie.")
+                                        );
                                     }}
                                     className="text-xs text-orange-600 hover:text-orange-800 flex items-center gap-1 transition-colors font-medium"
                                   >
@@ -5541,8 +5612,12 @@ ${b.styleExamplesBlock}`;
                                   </div>
                                   <button 
                                     onClick={() => {
-                                      navigator.clipboard.writeText(scene.fin?.prompt || scene.fin);
-                                      alert("T-copia Fin!");
+                                      void navigator.clipboard
+                                        .writeText(String(scene.fin?.prompt ?? scene.fin ?? ""))
+                                        .then(
+                                          () => showCopyToast("T-copia Fin!"),
+                                          () => showCopyToast("Ma-t9rachch l-copie.")
+                                        );
                                     }}
                                     className="text-xs text-orange-600 hover:text-orange-800 flex items-center gap-1 transition-colors font-medium"
                                   >
@@ -5743,8 +5818,10 @@ ${b.styleExamplesBlock}`;
                             }
                             
                             const fullTextToCopy = `${webhookResponseData.script || ''}${scenesText}`;
-                            navigator.clipboard.writeText(fullTextToCopy);
-                            alert("T-copia kolchi!");
+                            void navigator.clipboard.writeText(fullTextToCopy).then(
+                              () => showCopyToast("T-copia kolchi!"),
+                              () => showCopyToast("Ma-t9rachch l-copie.")
+                            );
                           }}
                           className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
                           title="Copi Kolchi"
@@ -5769,8 +5846,10 @@ ${b.styleExamplesBlock}`;
                             </button>
                             <button 
                               onClick={() => {
-                                navigator.clipboard.writeText(webhookResponseData.script);
-                                alert("T-copia Script!");
+                                void navigator.clipboard.writeText(String(webhookResponseData.script)).then(
+                                  () => showCopyToast("T-copia Script!"),
+                                  () => showCopyToast("Ma-t9rachch l-copie.")
+                                );
                               }}
                               className="text-sm text-orange-600 hover:text-orange-800 hover:bg-orange-100 flex items-center gap-2 bg-orange-50 px-3 py-1.5 rounded-lg transition-colors font-medium"
                             >
@@ -5822,8 +5901,12 @@ ${b.styleExamplesBlock}`;
                                       </div>
                                       <button 
                                         onClick={() => {
-                                          navigator.clipboard.writeText(scene.debut?.prompt || scene.debut);
-                                          alert("T-copia Debut!");
+                                          void navigator.clipboard
+                                            .writeText(String(scene.debut?.prompt ?? scene.debut ?? ""))
+                                            .then(
+                                              () => showCopyToast("T-copia Debut!"),
+                                              () => showCopyToast("Ma-t9rachch l-copie.")
+                                            );
                                         }}
                                         className="text-xs text-orange-600 hover:text-orange-800 flex items-center gap-1 transition-colors font-medium"
                                       >
@@ -5880,8 +5963,12 @@ ${b.styleExamplesBlock}`;
                                       </div>
                                       <button 
                                         onClick={() => {
-                                          navigator.clipboard.writeText(scene.fin?.prompt || scene.fin);
-                                          alert("T-copia Fin!");
+                                          void navigator.clipboard
+                                            .writeText(String(scene.fin?.prompt ?? scene.fin ?? ""))
+                                            .then(
+                                              () => showCopyToast("T-copia Fin!"),
+                                              () => showCopyToast("Ma-t9rachch l-copie.")
+                                            );
                                         }}
                                         className="text-xs text-orange-600 hover:text-orange-800 flex items-center gap-1 transition-colors font-medium"
                                       >
@@ -5937,8 +6024,10 @@ ${b.styleExamplesBlock}`;
                       <h3 className="font-bold text-gray-800">Natija mn l-Webhook (Raw)</h3>
                       <button 
                         onClick={() => {
-                          navigator.clipboard.writeText(webhookResponseText);
-                          alert("T-copia!");
+                          void navigator.clipboard.writeText(webhookResponseText).then(
+                            () => showCopyToast("T-copia!"),
+                            () => showCopyToast("Ma-t9rachch l-copie.")
+                          );
                         }}
                         className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
                         title="Copi"
@@ -6152,16 +6241,7 @@ ${b.styleExamplesBlock}`;
 
                             {(() => {
                               const tos = scene.textOnScreen;
-                              if (!hasVeo31 && (!tos || typeof tos !== "object")) return null;
-                              if (!tos || typeof tos !== "object") {
-                                return (
-                                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-950">
-                                    <span className="font-semibold">Text f screen</span> — ma-l9inach{" "}
-                                    <code className="text-[10px] bg-white/80 px-1 rounded">textOnScreen</code> — 3awd
-                                    &quot;Generi Veo&quot;.
-                                  </div>
-                                );
-                              }
+                              if (!tos || typeof tos !== "object") return null;
                               const allowed = tos.allowed === true;
                               const rationale =
                                 typeof tos.rationale === "string" ? tos.rationale.trim() : "";
@@ -6244,8 +6324,10 @@ ${b.styleExamplesBlock}`;
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        void navigator.clipboard.writeText(copyPayload);
-                                        alert("T-copia lines d text!");
+                                        void navigator.clipboard.writeText(copyPayload).then(
+                                          () => showCopyToast("T-copia lines d text!"),
+                                          () => showCopyToast("Ma-t9rachch l-copie.")
+                                        );
                                       }}
                                       className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-teal-700 rounded-lg hover:bg-teal-50 border border-transparent hover:border-teal-100"
                                       title="Copi kolchi"
@@ -6276,8 +6358,10 @@ ${b.styleExamplesBlock}`;
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      navigator.clipboard.writeText(scene.veoPrompt);
-                                      alert("T-copia veoPrompt!");
+                                      void navigator.clipboard.writeText(String(scene.veoPrompt)).then(
+                                        () => showCopyToast("T-copia veoPrompt!"),
+                                        () => showCopyToast("Ma-t9rachch l-copie.")
+                                      );
                                     }}
                                     className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-orange-500 rounded-lg hover:bg-orange-50 border border-transparent hover:border-orange-100"
                                     title="Copi veoPrompt"
@@ -6303,8 +6387,10 @@ ${b.styleExamplesBlock}`;
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        navigator.clipboard.writeText(scene.negativePrompt);
-                                        alert("T-copia negativePrompt!");
+                                        void navigator.clipboard.writeText(String(scene.negativePrompt)).then(
+                                          () => showCopyToast("T-copia negativePrompt!"),
+                                          () => showCopyToast("Ma-t9rachch l-copie.")
+                                        );
                                       }}
                                       className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 border border-transparent hover:border-gray-200"
                                       title="Copi negativePrompt"
@@ -6326,8 +6412,12 @@ ${b.styleExamplesBlock}`;
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      navigator.clipboard.writeText(JSON.stringify(scene, null, 2));
-                                      alert("T-copia Full JSON!");
+                                      void navigator.clipboard
+                                        .writeText(JSON.stringify(scene, null, 2))
+                                        .then(
+                                          () => showCopyToast("T-copia Full JSON!"),
+                                          () => showCopyToast("Ma-t9rachch l-copie.")
+                                        );
                                     }}
                                     className="shrink-0 self-start p-2.5 mt-0.5 text-gray-400 hover:text-orange-500 rounded-lg hover:bg-orange-50 border border-transparent hover:border-orange-100"
                                     title="Copi Full JSON"
@@ -6348,8 +6438,10 @@ ${b.styleExamplesBlock}`;
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          navigator.clipboard.writeText(prompt);
-                                          alert("T-copia Prompt!");
+                                          void navigator.clipboard.writeText(prompt).then(
+                                            () => showCopyToast("T-copia Prompt!"),
+                                            () => showCopyToast("Ma-t9rachch l-copie.")
+                                          );
                                         }}
                                         className="text-gray-400 hover:text-orange-500 transition-colors p-2 bg-gray-50 rounded-lg group-hover:bg-orange-50"
                                         title="Copi Prompt"
@@ -7019,6 +7111,17 @@ ${b.styleExamplesBlock}`;
           </div>
         </div>
       )}
+
+      {copyToast ? (
+        <div
+          className="fixed bottom-6 left-1/2 z-[60] flex max-w-[min(90vw,22rem)] -translate-x-1/2 items-center gap-2 rounded-2xl border border-green-200 bg-white px-4 py-3 text-sm font-medium text-green-900 shadow-lg shadow-green-900/10"
+          role="status"
+          aria-live="polite"
+        >
+          <Check className="h-5 w-5 shrink-0 text-green-600" aria-hidden />
+          <span className="min-w-0">{copyToast}</span>
+        </div>
+      ) : null}
 
     </div>
   );

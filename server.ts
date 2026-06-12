@@ -258,7 +258,7 @@ async function startServer() {
 
   app.post(
     "/api/ai/veo-scene-analyze",
-    express.json({ limit: "4mb" }),
+    express.json({ limit: "12mb" }),
     wrapAsync(async (req, res) => {
       try {
         const apiKey = process.env.OPENAI_API_KEY?.trim();
