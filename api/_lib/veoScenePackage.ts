@@ -600,7 +600,7 @@ export async function runVeoSceneAnalyze(
   env: { apiKey: string; visionModel?: string }
 ): Promise<VeoSceneAnalyzeResult> {
   const apiKey = env.apiKey;
-  const visionModel = env.visionModel?.trim() || "gpt-4o";
+  const visionModel = env.visionModel?.trim() || "gpt-4o-mini";
   const debutImageUrl = typeof body.debutImageUrl === "string" ? body.debutImageUrl.trim() : "";
   const finImageUrl = typeof body.finImageUrl === "string" ? body.finImageUrl.trim() : "";
   const debutPrompt = typeof body.debutPrompt === "string" ? body.debutPrompt.trim() : "";
@@ -780,7 +780,7 @@ export async function runVeoScenePackage(
     );
   }
 
-  const visionModel = env.visionModel?.trim() || "gpt-4o";
+  const visionModel = env.visionModel?.trim() || "gpt-4o-mini";
   const analyze = await runVeoSceneAnalyze(
     {
       debutImageUrl: body.debutImageUrl,

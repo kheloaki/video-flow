@@ -1,5 +1,5 @@
 /**
- * Vercel serverless: vision analysis (default gpt-4o) + VEO 3.1 scene JSON (OPENAI_VEO_SCENE_MODEL / gpt-4o-mini).
+ * Vercel serverless: vision analysis (default gpt-4o-mini) + VEO 3.1 scene JSON (OPENAI_VEO_SCENE_MODEL / gpt-4o-mini).
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { runVeoScenePackage } from "../_lib/veoScenePackage.js";
