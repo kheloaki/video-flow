@@ -1,7 +1,5 @@
-/**
- * Shared: vision analysis (debut+fin) + VEO 3.1 single-scene JSON package (OpenAI).
- * Used by Vercel `api/ai/veo-scene-package.ts` and local `server.ts`.
- */
+import type { AiUsagePayload } from "./aiUsage.js";
+import { parseOpenAiUsage } from "./aiUsage.js";
 
 export type VeoScenePackageRequestBody = {
   fullScript?: string;
@@ -35,7 +33,7 @@ export type VeoSceneAnalyzeRequestBody = {
 
 export type VeoSceneAnalyzeResult =
   | { ok: false; status: number; error: string }
-  | { ok: true; analysis: string };
+  | { ok: true; analysis: string; usage?: AiUsagePayload | null };
 
 export type VeoScenePackageResult =
   | { ok: false; status: number; error: string }
@@ -46,15 +44,19 @@ export type VeoScenePackageResult =
       scenePackage: unknown | null;
       rawPackageText?: string;
       parseError?: string;
+      usage?: AiUsagePayload | null;
     };
+
+type OpenAiChatResult = { content: string; usage: AiUsagePayload | null };
 
 async function openaiChat(
   messages: unknown[],
   temperature: number,
   apiKey: string,
   model: string,
-  opts?: { max_tokens?: number }
-): Promise<string> {
+  opts?: { max_tokens?: number; operation?: string }
+): Promise<OpenAiChatResult> {
+  const operation = opts?.operation ?? "openai-chat";
   const payload: Record<string, unknown> = {
     model,
     messages,
@@ -84,7 +86,10 @@ async function openaiChat(
     err.httpStatus = r.status;
     throw err;
   }
-  let j: { choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }> };
+  let j: {
+    choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
   try {
     j = JSON.parse(text) as typeof j;
   } catch {
@@ -101,7 +106,10 @@ async function openaiChat(
     err.httpStatus = 502;
     throw err;
   }
-  return String(content).trim();
+  return {
+    content: String(content).trim(),
+    usage: parseOpenAiUsage(j, model, operation),
+  };
 }
 
 function extractFirstJsonObject(raw: string): string {
@@ -599,7 +607,11 @@ export async function runVeoSceneAnalyze(
   const finPrompt = typeof body.finPrompt === "string" ? body.finPrompt.trim() : "";
   const workflowMode =
     body.workflowMode === "clone" || body.workflowMode === "ad" ? body.workflowMode : "ad";
-  const imageDetail = workflowMode === "clone" ? "high" : "auto";
+  const usesInlineImages =
+    debutImageUrl.startsWith("data:") || finImageUrl.startsWith("data:");
+  /** `high` only with HTTPS URLs — data URLs on Vercel are already compressed client-side. */
+  const imageDetail =
+    workflowMode === "clone" && !usesInlineImages ? "high" : "auto";
   const veoOutputDurationSec =
     typeof body.veoOutputDurationSec === "number" && body.veoOutputDurationSec > 0
       ? body.veoOutputDurationSec
@@ -617,8 +629,20 @@ export async function runVeoSceneAnalyze(
     return { ok: false, status: 400, error: "debutImageUrl w finImageUrl (URLs dial tsawer) khasshom." };
   }
 
+  const inlinePayloadBytes =
+    (debutImageUrl.startsWith("data:") ? debutImageUrl.length : 0) +
+    (finImageUrl.startsWith("data:") ? finImageUrl.length : 0);
+  if (inlinePayloadBytes > 3_800_000) {
+    return {
+      ok: false,
+      status: 413,
+      error:
+        "Tsawer kbira bzaf f request (data URL). Compressiw frames wla uploadiw b UploadThing — max ~3.5MB l-jouj tsawer.",
+    };
+  }
+
   try {
-    const analysisText = await openaiChat(
+    const { content: analysisText, usage } = await openaiChat(
       [
         {
           role: "user",
@@ -648,9 +672,9 @@ export async function runVeoSceneAnalyze(
       0.3,
       apiKey,
       visionModel,
-      { max_tokens: workflowMode === "clone" ? 5000 : 2048 }
+      { max_tokens: workflowMode === "clone" ? 4096 : 2048, operation: "veo-scene-analyze" }
     );
-    return { ok: true, analysis: analysisText };
+    return { ok: true, analysis: analysisText, usage };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const httpStatus =
@@ -700,17 +724,17 @@ export async function runVeoScenePackageFromAnalysis(
       workflowMode,
     });
 
-    const jsonRaw = await openaiChat(
+    const { content: jsonRaw, usage } = await openaiChat(
       [{ role: "user", content: packagePrompt }],
       0.35,
       apiKey,
       textModel,
-      { max_tokens: 8192 }
+      { max_tokens: 8192, operation: "veo-scene-package" }
     );
 
     try {
       const scenePackage = omitTextOnScreen(JSON.parse(extractFirstJsonObject(jsonRaw)));
-      return { ok: true, analysis: imageAnalysis, scenePackage };
+      return { ok: true, analysis: imageAnalysis, scenePackage, usage };
     } catch (parseErr) {
       return {
         ok: true,
@@ -718,6 +742,7 @@ export async function runVeoScenePackageFromAnalysis(
         scenePackage: null,
         rawPackageText: jsonRaw,
         parseError: parseErr instanceof Error ? parseErr.message : String(parseErr),
+        usage,
       };
     }
   } catch (e) {

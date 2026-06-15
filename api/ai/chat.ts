@@ -2,6 +2,7 @@
  * Vercel serverless: self-contained. Mirrors root `aiHandlers.ts` — update both when changing chat.
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { parseOpenAiUsage, type AiUsagePayload } from "../_lib/aiUsage.js";
 
 export const config = {
   api: {
@@ -22,7 +23,7 @@ async function runOpenAIChat(
   temperature: number,
   apiKey: string,
   modelEnv: string | undefined
-): Promise<string> {
+): Promise<{ text: string; usage: AiUsagePayload | null }> {
   const model = modelEnv?.trim() || "gpt-4o-mini";
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -51,8 +52,12 @@ async function runOpenAIChat(
   }
   const j = JSON.parse(text) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   };
-  return j.choices?.[0]?.message?.content ?? "";
+  return {
+    text: j.choices?.[0]?.message?.content ?? "",
+    usage: parseOpenAiUsage(j, model, "chat"),
+  };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -82,13 +87,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const text = await runOpenAIChat(
+    const { text, usage } = await runOpenAIChat(
       messages,
       typeof temperature === "number" ? temperature : 0.7,
       apiKey,
       process.env.OPENAI_CHAT_MODEL
     );
-    return res.status(200).json({ text });
+    return res.status(200).json({ text, usage: usage ?? null });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const httpStatus =

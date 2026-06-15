@@ -3,14 +3,17 @@
  * Vercel serverless duplicates this logic inside `api/ai/*.ts` (single-file bundle).
  */
 import { GoogleGenAI } from "@google/genai";
+import { buildGeminiUsage, parseOpenAiUsage, type AiUsagePayload } from "./api/_lib/aiUsage.js";
 
 export const GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024;
+
+export type { AiUsagePayload };
 
 export async function runGeminiTranscription(
   buffer: Buffer,
   mimeType: string,
   options: { apiKey: string; model?: string }
-): Promise<{ text: string }> {
+): Promise<{ text: string; usage: AiUsagePayload | null }> {
   if (buffer.length > GEMINI_INLINE_MAX_BYTES) {
     throw new Error(
       "Media kbir bzaf (~max 20MB l-Gemini inline). Jereb video sgher wla extract dial soute."
@@ -30,15 +33,21 @@ export async function runGeminiTranscription(
       },
     ],
   });
-  return { text: (response.text ?? "").trim() };
+  const usageMeta = (response as { usageMetadata?: Parameters<typeof buildGeminiUsage>[2] })
+    .usageMetadata;
+  return {
+    text: (response.text ?? "").trim(),
+    usage: buildGeminiUsage(model, "transcribe", usageMeta),
+  };
 }
 
 export async function runOpenAIChat(
   messages: unknown[],
   temperature: number,
-  options: { apiKey: string; model?: string }
-): Promise<{ text: string }> {
+  options: { apiKey: string; model?: string; operation?: string }
+): Promise<{ text: string; usage: AiUsagePayload | null }> {
   const model = options.model?.trim() || "gpt-4o-mini";
+  const operation = options.operation ?? "chat";
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -66,6 +75,10 @@ export async function runOpenAIChat(
   }
   const j = JSON.parse(text) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   };
-  return { text: j.choices?.[0]?.message?.content ?? "" };
+  return {
+    text: j.choices?.[0]?.message?.content ?? "",
+    usage: parseOpenAiUsage(j, model, operation),
+  };
 }

@@ -2,7 +2,7 @@
  * Vercel serverless: vision analysis (default gpt-4o) + VEO 3.1 scene JSON (OPENAI_VEO_SCENE_MODEL / gpt-4o-mini).
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { runVeoScenePackage } from "../../lib/veoScenePackage";
+import { runVeoScenePackage } from "../_lib/veoScenePackage.js";
 
 export const config = {
   api: {
@@ -48,6 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({
       analysis: result.analysis,
       scenePackage: result.scenePackage,
+      usage: result.usage ?? null,
       ...(result.rawPackageText !== undefined ? { rawPackageText: result.rawPackageText } : {}),
       ...(result.parseError !== undefined ? { parseError: result.parseError } : {}),
     });

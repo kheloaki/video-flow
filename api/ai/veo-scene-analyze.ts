@@ -2,12 +2,12 @@
  * Vercel serverless: vision only (debut+fin stills) — keep under serverless time limits; pair with veo-scene-package + imageAnalysis.
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { runVeoSceneAnalyze } from "../../lib/veoScenePackage";
+import { runVeoSceneAnalyze } from "../_lib/veoScenePackage.js";
 
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: "12mb",
+      sizeLimit: "4.5mb",
     },
   },
   maxDuration: 120,
@@ -41,7 +41,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(result.status).json({ error: result.error });
     }
 
-    return res.status(200).json({ analysis: result.analysis });
+    return res.status(200).json({ analysis: result.analysis, usage: result.usage ?? null });
   } catch (e) {
     console.error("veo-scene-analyze", e);
     const msg = e instanceof Error ? e.message : String(e);

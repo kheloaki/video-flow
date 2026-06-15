@@ -6,6 +6,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { GoogleGenAI } from "@google/genai";
 import formidable from "formidable";
 import fs from "fs/promises";
+import { buildGeminiUsage, type AiUsagePayload } from "../_lib/aiUsage.js";
 
 const GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -26,7 +27,7 @@ async function runGeminiTranscription(
   mimeType: string,
   apiKey: string,
   modelEnv: string | undefined
-): Promise<string> {
+): Promise<{ text: string; usage: AiUsagePayload | null }> {
   if (buffer.length > GEMINI_INLINE_MAX_BYTES) {
     throw new Error(
       "Media kbir bzaf (~max 20MB l-Gemini inline). Jereb video sgher wla extract dial soute."
@@ -46,7 +47,12 @@ async function runGeminiTranscription(
       },
     ],
   });
-  return (response.text ?? "").trim();
+  const usageMeta = (response as { usageMetadata?: Parameters<typeof buildGeminiUsage>[2] })
+    .usageMetadata;
+  return {
+    text: (response.text ?? "").trim(),
+    usage: buildGeminiUsage(model, "transcribe", usageMeta),
+  };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -97,13 +103,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const text = await runGeminiTranscription(
+    const { text, usage } = await runGeminiTranscription(
       buffer,
       mime,
       geminiKey,
       process.env.GEMINI_TRANSCRIPTION_MODEL
     );
-    return res.status(200).json({ text });
+    return res.status(200).json({ text, usage: usage ?? null });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const status = msg.includes("kbir") ? 400 : 500;

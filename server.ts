@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
-import { runVeoSceneAnalyze, runVeoScenePackage } from "./lib/veoScenePackage";
+import { runVeoSceneAnalyze, runVeoScenePackage } from "./api/_lib/veoScenePackage.js";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -196,7 +196,7 @@ async function startServer() {
           req.file.mimetype && req.file.mimetype !== ""
             ? req.file.mimetype
             : "application/octet-stream";
-        const { text } = await runGeminiTranscription(
+        const { text, usage } = await runGeminiTranscription(
           req.file.buffer,
           mimeType,
           {
@@ -204,7 +204,7 @@ async function startServer() {
             model: process.env.GEMINI_TRANSCRIPTION_MODEL,
           }
         );
-        sendJson(res, 200, { text });
+        sendJson(res, 200, { text, usage: usage ?? null });
       } catch (e) {
         console.error("transcribe", e);
         const msg = safeErrMessage(e);
@@ -233,15 +233,16 @@ async function startServer() {
               "OPENAI_API_KEY nqsa 3la server. Zid OPENAI_API_KEY f .env w 3awd demmar npm run dev.",
           });
         }
-        const { text: content } = await runOpenAIChat(
+        const { text: content, usage } = await runOpenAIChat(
           messages,
           typeof temperature === "number" ? temperature : 0.7,
           {
             apiKey,
             model: process.env.OPENAI_CHAT_MODEL,
+            operation: "chat",
           }
         );
-        sendJson(res, 200, { text: content });
+        sendJson(res, 200, { text: content, usage: usage ?? null });
       } catch (e) {
         console.error("chat", e);
         const msg = safeErrMessage(e);
@@ -274,7 +275,7 @@ async function startServer() {
         if (result.ok === false) {
           return sendJson(res, result.status, { error: result.error });
         }
-        return sendJson(res, 200, { analysis: result.analysis });
+        return sendJson(res, 200, { analysis: result.analysis, usage: result.usage ?? null });
       } catch (e) {
         console.error("veo-scene-analyze", e);
         sendJson(res, 500, { error: safeErrMessage(e) });
@@ -307,6 +308,7 @@ async function startServer() {
         const payload: Record<string, unknown> = {
           analysis: result.analysis,
           scenePackage: result.scenePackage,
+          usage: result.usage ?? null,
         };
         if (result.rawPackageText !== undefined) {
           payload.rawPackageText = result.rawPackageText;

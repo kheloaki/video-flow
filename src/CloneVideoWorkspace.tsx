@@ -17,6 +17,9 @@ import { twMerge } from "tailwind-merge";
 import JSZip from "jszip";
 import { buildCloneDebutFinPrompts, buildCloneFullScript, CLONE_VEO_SCENE_SECONDS } from "./utils/buildCloneFullScript";
 import { postAiJson } from "./utils/postAiJson";
+import { prepareVisionImageUrl } from "./utils/prepareVisionImageUrl";
+import { isAiUsagePayload, type AiUsagePayload } from "./utils/aiUsage";
+import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
 import {
   autoSceneBoundaries,
   downloadDataUrl,
@@ -42,6 +45,8 @@ type CloneScene = {
   negativePrompt?: string;
   parseError?: string;
   rawPackageText?: string;
+  usageAnalyze?: AiUsagePayload;
+  usagePrompt?: AiUsagePayload;
   analyzeStatus: "idle" | "loading" | "done" | "error";
   promptStatus: "idle" | "loading" | "done" | "error";
   error?: string;
@@ -214,11 +219,15 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
           debut: s.debut,
           fin: s.fin,
         });
+        const [debutImageUrl, finImageUrl] = await Promise.all([
+          prepareVisionImageUrl(s.debut.dataUrl, `scene-${s.sceneNumber}-debut.jpg`),
+          prepareVisionImageUrl(s.fin.dataUrl, `scene-${s.sceneNumber}-fin.jpg`),
+        ]);
         const json = await postAiJson(
           "/api/ai/veo-scene-analyze",
           {
-            debutImageUrl: s.debut.dataUrl,
-            finImageUrl: s.fin.dataUrl,
+            debutImageUrl,
+            finImageUrl,
             debutPrompt,
             finPrompt,
             workflowMode: "clone",
@@ -227,11 +236,13 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             referenceFinSec: s.fin.timeSec,
             veoOutputDurationSec: CLONE_VEO_SCENE_SECONDS,
           },
-          180_000
+          180_000,
+          `Clone analyze — Scene ${s.sceneNumber}`
         );
         next[i] = {
           ...next[i],
           analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
+          usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : undefined,
           analyzeStatus: "done",
         };
       } catch (e) {
@@ -282,7 +293,8 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             languageLabel: "Moroccan Darija",
             workflowMode: "clone",
           },
-          180_000
+          180_000,
+          `Clone Veo package — Scene ${s.sceneNumber}`
         );
 
         if (data.scenePackage != null) {
@@ -293,6 +305,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             veoPrompt: typeof pkg.veoPrompt === "string" ? pkg.veoPrompt : "",
             negativePrompt:
               typeof pkg.negativePrompt === "string" ? pkg.negativePrompt : "",
+            usagePrompt: isAiUsagePayload(data.usage) ? data.usage : undefined,
             promptStatus: "done",
           };
         } else {
@@ -353,6 +366,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             <Clapperboard className="w-5 h-5 text-white" />
           </div>
           <h1 className="font-bold text-lg">Clone Video</h1>
+          <AiUsageTodayBadge />
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-wrap gap-2">
           {STEP_LABELS.map((label, i) => {
@@ -622,15 +636,18 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             <div className="space-y-4">
               {scenes.map((s) => (
                 <div key={s.sceneNumber} className="border border-gray-100 rounded-xl p-4 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="font-bold">Scene {s.sceneNumber}</span>
-                    {s.analyzeStatus === "loading" ? (
+                    <div className="flex items-center gap-2">
+                      {s.usageAnalyze ? <AiUsageCostChip usage={s.usageAnalyze} /> : null}
+                      {s.analyzeStatus === "loading" ? (
                       <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
                     ) : s.analyzeStatus === "done" ? (
                       <Check className="w-4 h-4 text-green-600" />
                     ) : s.analyzeStatus === "error" ? (
                       <AlertCircle className="w-4 h-4 text-red-500" />
                     ) : null}
+                    </div>
                   </div>
                   <div className="flex gap-2">
                     <img src={s.debut.dataUrl} alt="" className="w-16 aspect-[9/16] object-cover rounded-lg" />
@@ -698,7 +715,10 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
               <div key={s.sceneNumber} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="font-bold text-lg">Scene {s.sceneNumber}</h3>
-                  <button
+                  <div className="flex flex-wrap items-center gap-2">
+                    {s.usageAnalyze ? <AiUsageCostChip usage={s.usageAnalyze} /> : null}
+                    {s.usagePrompt ? <AiUsageCostChip usage={s.usagePrompt} /> : null}
+                    <button
                     type="button"
                     onClick={() => void downloadScenePairZip(s)}
                     className="text-sm px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg font-medium flex items-center gap-1.5"
@@ -706,6 +726,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
                     <Download className="w-4 h-4" />
                     ZIP debut + fin
                   </button>
+                  </div>
                 </div>
                 <div className="flex gap-4">
                   <div className="text-center">

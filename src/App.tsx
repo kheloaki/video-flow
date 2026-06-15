@@ -37,6 +37,8 @@ import {
 } from 'lucide-react';
 import CloneVideoWorkspace from "./CloneVideoWorkspace.tsx";
 import { ProductHub } from "./components/ProductHub.tsx";
+import { AiUsagePanel, AiUsageTodayBadge } from "./components/AiUsagePanel.tsx";
+import { recordAiUsageFromResponse } from "./utils/aiUsage.ts";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Markdown from 'react-markdown';
@@ -1257,7 +1259,12 @@ async function fetchVeoScenePackageWithTimeout(
 }
 
 /** POST + JSON body; parse JSON response; throw with useful message if server returns non-JSON (e.g. Vercel timeout). */
-async function postAiJson(url: string, body: unknown, timeoutMs: number): Promise<Record<string, unknown>> {
+async function postAiJson(
+  url: string,
+  body: unknown,
+  timeoutMs: number,
+  label?: string
+): Promise<Record<string, unknown>> {
   const res = await fetchVeoScenePackageWithTimeout(url, body, timeoutMs);
   const rawText = await res.text();
   const ct = res.headers.get("content-type") ?? "";
@@ -1278,6 +1285,7 @@ async function postAiJson(url: string, body: unknown, timeoutMs: number): Promis
     const errMsg = typeof data.error === "string" ? data.error.trim() : "";
     throw new Error(errMsg || rawText.trim().slice(0, 500) || `HTTP ${res.status}`);
   }
+  if (label) recordAiUsageFromResponse(data, label);
   return data;
 }
 
@@ -2520,6 +2528,7 @@ export default function App() {
       const transcribeJson = (await transcribeRes.json().catch(() => ({}))) as {
         text?: string;
         error?: string;
+        usage?: unknown;
       };
       if (!transcribeRes.ok) {
         if (transcribeRes.status === 404) {
@@ -2532,6 +2541,8 @@ export default function App() {
             `Transcription HTTP ${transcribeRes.status}`
         );
       }
+
+      recordAiUsageFromResponse(transcribeJson as Record<string, unknown>, "Video transcription");
 
       const rawTranscript = transcribeJson.text?.trim() ?? "";
       const transcription =
@@ -2746,7 +2757,7 @@ export default function App() {
     }
   }, [user, webhookUrl, imagesWebhookUrl]);
 
-  const callAiChat = async (prompt: string, temperature: number) => {
+  const callAiChat = async (prompt: string, temperature: number, label = "Chat") => {
     const chatRes = await fetch(apiUrl("/api/ai/chat"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2758,10 +2769,12 @@ export default function App() {
     const chatJson = (await chatRes.json().catch(() => ({}))) as {
       text?: string;
       error?: string;
+      usage?: unknown;
     };
     if (!chatRes.ok) {
       throw new Error(chatJson.error || `Generi HTTP ${chatRes.status}`);
     }
+    recordAiUsageFromResponse(chatJson as Record<string, unknown>, label);
     const responseText = chatJson.text?.trim();
     if (!responseText) {
       throw new Error("Smah lina, ma9dernach n-generiw t-text.");
@@ -2818,7 +2831,7 @@ Required sections (fill under each title, be concise — strategy only, no scene
 **المسار العاطفي**
 **اتجاه الـ CTA**`;
 
-      const text = await callAiChat(prompt, b.temperature);
+      const text = await callAiChat(prompt, b.temperature, "Step 1 — Script idea");
       setScriptIdea(text);
     } catch (err) {
       console.error(err);
@@ -2882,7 +2895,7 @@ TASK: Write ONLY the voiceover dialogue for the full ad duration, strictly follo
 - Respect the word-count / duration rules strictly.
 - Do not add a title or preamble — start directly with the first spoken words.`;
 
-      const text = await callAiChat(prompt, b.temperature);
+      const text = await callAiChat(prompt, b.temperature, "Step 2 — Voice script");
       setVoiceOnlyScript(text);
     } catch (err) {
       console.error(err);
@@ -2972,7 +2985,7 @@ ALWAYS output BOTH "## Model" and "## Background" sections in full — never omi
 
 Do not add any text before "## Model" or after the Background paragraph. Headings must be exactly "## Model" and "## Background".`;
 
-      const text = await callAiChat(prompt, b.temperature);
+      const text = await callAiChat(prompt, b.temperature, "Step 3 — Visual prompts");
       const trimmed = text.trim();
       const parsed = parseStep3ModelBackground(trimmed);
       if (parsed) {
@@ -3090,7 +3103,7 @@ BACKGROUND LOCK — In [شنو تبيني فالفيديو] for every scene, kee
 
 ${b.styleExamplesBlock}`;
 
-      const responseText = await callAiChat(prompt, b.temperature);
+      const responseText = await callAiChat(prompt, b.temperature, "Step 4 — Full script");
       setGeneratedScript(responseText);
       setGeneratedScenes(null);
     } catch (err) {
@@ -3498,7 +3511,8 @@ ${b.styleExamplesBlock}`;
             debutPrompt,
             finPrompt,
           },
-          180_000
+          180_000,
+          `Veo analyze — Scene ${sceneNum}`
         );
         const analysis =
           typeof analyzeData.analysis === "string" ? analyzeData.analysis : "";
@@ -3515,7 +3529,8 @@ ${b.styleExamplesBlock}`;
             languageLabel,
             imageAnalysis: analysis,
           },
-          180_000
+          180_000,
+          `Veo package — Scene ${sceneNum}`
         )) as {
           analysis?: string;
           scenePackage?: unknown;
@@ -4495,6 +4510,7 @@ ${b.styleExamplesBlock}`;
                 <Sparkles className="w-5 h-5 text-white" />
               </div>
               <h1 className="font-bold text-base sm:text-xl tracking-tight truncate">Video Flow</h1>
+              <AiUsageTodayBadge />
             </div>
             <div className="flex items-center gap-1 sm:hidden shrink-0">
               <button onClick={() => setActiveTab("settings")} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="I3dadat">
@@ -6525,6 +6541,11 @@ ${b.styleExamplesBlock}`;
                   dialk f Supabase.
                 </p>
               </div>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 space-y-4">
+              <h3 className="font-semibold text-gray-800">AI usage & cost (estimate)</h3>
+              <AiUsagePanel />
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 space-y-4">

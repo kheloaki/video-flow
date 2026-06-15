@@ -1,4 +1,5 @@
 import { apiUrl } from "../apiBase";
+import { recordAiUsageFromResponse } from "./aiUsage";
 
 async function fetchWithTimeout(
   url: string,
@@ -23,7 +24,8 @@ async function fetchWithTimeout(
 export async function postAiJson(
   path: string,
   body: unknown,
-  timeoutMs: number
+  timeoutMs: number,
+  label?: string
 ): Promise<Record<string, unknown>> {
   const res = await fetchWithTimeout(apiUrl(path), body, timeoutMs);
   const rawText = await res.text();
@@ -43,7 +45,14 @@ export async function postAiJson(
   }
   if (!res.ok) {
     const errMsg = typeof data.error === "string" ? data.error.trim() : "";
-    throw new Error(errMsg || rawText.trim().slice(0, 500) || `HTTP ${res.status}`);
+    const body = rawText.trim().slice(0, 500) || `HTTP ${res.status}`;
+    if (body.includes("FUNCTION_INVOCATION_FAILED")) {
+      throw new Error(
+        "Vercel server crash (FUNCTION_INVOCATION_FAILED) — 9rib tsawer kbira bzaf f request. Kan-compressiw auto; 3awd analyze. Ila baqi, chof Vercel logs."
+      );
+    }
+    throw new Error(errMsg || body);
   }
+  if (label) recordAiUsageFromResponse(data, label);
   return data;
 }

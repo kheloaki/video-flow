@@ -1,6 +1,7 @@
 import { Clapperboard, LogOut, Sparkles } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { AiUsageTodayBadge } from "./AiUsagePanel";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -23,6 +24,7 @@ export function ProductHub({ onOpenFlow, onOpenClone, onLogout, userEmail }: Pro
               <Sparkles className="w-5 h-5 text-white" />
             </div>
             <span className="font-bold text-lg">Video Flow</span>
+            <AiUsageTodayBadge />
           </div>
           <button
             type="button"
