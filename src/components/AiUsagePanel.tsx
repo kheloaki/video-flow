@@ -2,14 +2,17 @@ import { useEffect, useState } from "react";
 import { Coins } from "lucide-react";
 import {
   AI_USAGE_CHANGED_EVENT,
+  AI_USAGE_DB_CHANGED_EVENT,
   formatCostUsd,
   formatTokens,
   formatUsageLine,
   getRecentDailySummaries,
   getRecentEntries,
   getTodaySummary,
+  getAllTimeSummary,
   type AiUsageDaySummary,
 } from "../utils/aiUsage";
+import { fetchUsageBalance } from "../utils/aiUsageDb";
 
 function DayRow({ s }: { s: AiUsageDaySummary }) {
   const isToday = s.day === new Date().toISOString().slice(0, 10);
@@ -34,24 +37,63 @@ type Props = {
   variant?: "compact" | "full";
 };
 
-export function AiUsageTodayBadge() {
-  const [summary, setSummary] = useState(getTodaySummary);
+export function AiUsageTodayBadge({ userId }: { userId?: string }) {
+  const [localToday, setLocalToday] = useState(getTodaySummary);
+  const [localAll, setLocalAll] = useState(getAllTimeSummary);
+  const [dbToday, setDbToday] = useState<number | null>(null);
+  const [dbAll, setDbAll] = useState<number | null>(null);
 
   useEffect(() => {
-    const refresh = () => setSummary(getTodaySummary());
-    window.addEventListener(AI_USAGE_CHANGED_EVENT, refresh);
-    return () => window.removeEventListener(AI_USAGE_CHANGED_EVENT, refresh);
+    const refreshLocal = () => {
+      setLocalToday(getTodaySummary());
+      setLocalAll(getAllTimeSummary());
+    };
+    window.addEventListener(AI_USAGE_CHANGED_EVENT, refreshLocal);
+    return () => window.removeEventListener(AI_USAGE_CHANGED_EVENT, refreshLocal);
   }, []);
 
-  if (summary.callCount === 0) return null;
+  useEffect(() => {
+    if (!userId) {
+      setDbToday(null);
+      setDbAll(null);
+      return;
+    }
+    const load = () => {
+      void fetchUsageBalance(userId)
+        .then((b) => {
+          setDbToday(b.today.totalCostUsd);
+          setDbAll(b.allTime.totalCostUsd);
+        })
+        .catch(() => {
+          setDbToday(null);
+          setDbAll(null);
+        });
+    };
+    load();
+    window.addEventListener(AI_USAGE_DB_CHANGED_EVENT, load);
+    return () => window.removeEventListener(AI_USAGE_DB_CHANGED_EVENT, load);
+  }, [userId]);
+
+  const todayCost = userId && dbToday != null ? dbToday : localToday.totalCostUsd;
+  const allCost = userId && dbAll != null ? dbAll : localAll.totalCostUsd;
+  const hasUsage = todayCost > 0 || allCost > 0;
+  if (!userId && !hasUsage) return null;
 
   return (
     <span
-      className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full tabular-nums"
-      title={`${summary.callCount} AI calls today`}
+      className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full tabular-nums"
+      title={userId ? "AI spend (database)" : "AI spend (local)"}
     >
-      <Coins className="w-3.5 h-3.5" />
-      {formatCostUsd(summary.totalCostUsd)} today
+      <Coins className="w-3.5 h-3.5 shrink-0" />
+      <span>
+        Today <span className="font-semibold">{formatCostUsd(todayCost)}</span>
+      </span>
+      <span className="text-emerald-300" aria-hidden>
+        |
+      </span>
+      <span>
+        All <span className="font-semibold">{formatCostUsd(allCost)}</span>
+      </span>
     </span>
   );
 }
@@ -156,8 +198,8 @@ export function AiUsagePanel({ variant = "full" }: Props) {
       ) : null}
 
       <p className="text-[11px] text-gray-400 leading-snug">
-        Estimates from OpenAI/Gemini token counts × published rates. Stored locally in this browser
-        only.
+        Estimates from OpenAI/Gemini token counts × published rates. When signed in, also saved to
+        Supabase (see Usage page).
       </p>
     </div>
   );

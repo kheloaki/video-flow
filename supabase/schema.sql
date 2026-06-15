@@ -165,3 +165,73 @@ create policy "user_app_settings_insert_own" on public.user_app_settings
 
 create policy "user_app_settings_update_own" on public.user_app_settings
   for update using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+-- Monthly AI budget cap (USD) — optional; null = no cap
+alter table public.user_app_settings
+  add column if not exists ai_monthly_budget_usd numeric(10, 2);
+
+-- ========== ai_usage_log ==========
+create table if not exists public.ai_usage_log (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users (id) on delete cascade,
+  label text not null default '',
+  operation text not null default '',
+  provider text not null default 'openai',
+  model text not null default '',
+  prompt_tokens integer not null default 0,
+  completion_tokens integer not null default 0,
+  total_tokens integer not null default 0,
+  cost_usd numeric(12, 6) not null default 0,
+  project_type text,
+  project_id uuid,
+  created_at timestamptz not null default now()
+);
+
+alter table public.ai_usage_log enable row level security;
+
+drop policy if exists "ai_usage_log_select_own" on public.ai_usage_log;
+drop policy if exists "ai_usage_log_insert_own" on public.ai_usage_log;
+
+create policy "ai_usage_log_select_own" on public.ai_usage_log
+  for select using (owner_id = auth.uid());
+
+create policy "ai_usage_log_insert_own" on public.ai_usage_log
+  for insert with check (owner_id = auth.uid());
+
+create index if not exists ai_usage_log_owner_created_idx on public.ai_usage_log (owner_id, created_at desc);
+
+-- ========== clone_projects ==========
+create table if not exists public.clone_projects (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references auth.users (id) on delete cascade,
+  name text not null default 'Clone project',
+  source_video_name text,
+  duration_sec numeric(10, 2),
+  status text not null default 'draft',
+  step integer not null default 1,
+  data jsonb not null default '{}',
+  total_cost_usd numeric(12, 6) not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.clone_projects enable row level security;
+
+drop policy if exists "clone_projects_select_own" on public.clone_projects;
+drop policy if exists "clone_projects_insert_own" on public.clone_projects;
+drop policy if exists "clone_projects_update_own" on public.clone_projects;
+drop policy if exists "clone_projects_delete_own" on public.clone_projects;
+
+create policy "clone_projects_select_own" on public.clone_projects
+  for select using (owner_id = auth.uid());
+
+create policy "clone_projects_insert_own" on public.clone_projects
+  for insert with check (owner_id = auth.uid());
+
+create policy "clone_projects_update_own" on public.clone_projects
+  for update using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+create policy "clone_projects_delete_own" on public.clone_projects
+  for delete using (owner_id = auth.uid());
+
+create index if not exists clone_projects_owner_updated_idx on public.clone_projects (owner_id, updated_at desc);

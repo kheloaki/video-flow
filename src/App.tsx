@@ -36,9 +36,10 @@ import {
   ArrowLeft,
 } from 'lucide-react';
 import CloneVideoWorkspace from "./CloneVideoWorkspace.tsx";
+import UsagePage from "./UsagePage.tsx";
 import { ProductHub } from "./components/ProductHub.tsx";
 import { AiUsagePanel, AiUsageTodayBadge } from "./components/AiUsagePanel.tsx";
-import { recordAiUsageFromResponse } from "./utils/aiUsage.ts";
+import { recordAiUsageFromResponse, setUsagePersistContext } from "./utils/aiUsage.ts";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Markdown from 'react-markdown';
@@ -1687,7 +1688,7 @@ export default function App() {
   const [videos, setVideos] = useState<VideoData[]>([]);
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   
-  const [productView, setProductView] = useState<"hub" | "flow" | "clone">("hub");
+  const [productView, setProductView] = useState<"hub" | "flow" | "clone" | "usage">("hub");
   const [activeTab, setActiveTab] = useState<
     "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
   >(() => workspaceDraft?.activeTab ?? "products");
@@ -2243,6 +2244,14 @@ export default function App() {
       setGeneratedVideoUrl(null);
     }
   }, []);
+
+  useEffect(() => {
+    if (user?.id) {
+      setUsagePersistContext({ userId: user.id });
+    } else {
+      setUsagePersistContext(null);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4448,15 +4457,29 @@ ${b.styleExamplesBlock}`;
     return (
       <ProductHub
         userEmail={user.email}
+        userId={user.id}
         onOpenFlow={() => setProductView("flow")}
         onOpenClone={() => setProductView("clone")}
+        onOpenUsage={() => setProductView("usage")}
         onLogout={() => void handleLogout()}
       />
     );
   }
 
+  if (productView === "usage") {
+    return (
+      <UsagePage userId={user.id} onBack={() => setProductView("hub")} />
+    );
+  }
+
   if (productView === "clone") {
-    return <CloneVideoWorkspace onBack={() => setProductView("hub")} />;
+    return (
+      <CloneVideoWorkspace
+        userId={user.id}
+        onBack={() => setProductView("hub")}
+        onOpenUsage={() => setProductView("usage")}
+      />
+    );
   }
 
   return (
@@ -4510,7 +4533,7 @@ ${b.styleExamplesBlock}`;
                 <Sparkles className="w-5 h-5 text-white" />
               </div>
               <h1 className="font-bold text-base sm:text-xl tracking-tight truncate">Video Flow</h1>
-              <AiUsageTodayBadge />
+              <AiUsageTodayBadge userId={user?.id} />
             </div>
             <div className="flex items-center gap-1 sm:hidden shrink-0">
               <button onClick={() => setActiveTab("settings")} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" type="button" title="I3dadat">
@@ -6544,7 +6567,16 @@ ${b.styleExamplesBlock}`;
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 sm:p-6 space-y-4">
-              <h3 className="font-semibold text-gray-800">AI usage & cost (estimate)</h3>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-semibold text-gray-800">AI usage (local preview)</h3>
+                <button
+                  type="button"
+                  onClick={() => setProductView("usage")}
+                  className="text-sm font-medium text-emerald-700 hover:underline"
+                >
+                  Full usage page →
+                </button>
+              </div>
               <AiUsagePanel />
             </div>
 

@@ -1,5 +1,7 @@
 /** Client-side AI usage log (localStorage) + display helpers. */
 
+import { insertUsageLog } from "./aiUsageDb";
+
 export type AiUsagePayload = {
   provider: "openai" | "gemini";
   model: string;
@@ -28,6 +30,23 @@ export type AiUsageDaySummary = {
 const STORAGE_KEY = "ai-usage-log-v1";
 const MAX_ENTRIES = 2000;
 export const AI_USAGE_CHANGED_EVENT = "ai-usage-changed";
+export const AI_USAGE_DB_CHANGED_EVENT = "ai-usage-db-changed";
+
+export type UsagePersistContext = {
+  userId: string;
+  projectType?: string;
+  projectId?: string;
+};
+
+let persistContext: UsagePersistContext | null = null;
+
+export function setUsagePersistContext(ctx: UsagePersistContext | null) {
+  persistContext = ctx;
+}
+
+export function getUsagePersistContext(): UsagePersistContext | null {
+  return persistContext;
+}
 
 function todayKey(d = new Date()): string {
   return d.toISOString().slice(0, 10);
@@ -71,6 +90,18 @@ export function recordAiUsage(usage: AiUsagePayload, label: string): AiUsageLogE
   };
   const next = [entry, ...loadLog()];
   saveLog(next);
+
+  if (persistContext?.userId) {
+    void insertUsageLog(persistContext.userId, usage, label, {
+      projectType: persistContext.projectType,
+      projectId: persistContext.projectId,
+    })
+      .then(() => {
+        window.dispatchEvent(new CustomEvent(AI_USAGE_DB_CHANGED_EVENT));
+      })
+      .catch((e) => console.error("ai_usage_log insert failed", e));
+  }
+
   return entry;
 }
 
@@ -84,6 +115,25 @@ export function recordAiUsageFromResponse(
 
 export function getTodaySummary(): AiUsageDaySummary {
   return summarizeDay(todayKey());
+}
+
+export function getAllTimeSummary(): {
+  totalTokens: number;
+  totalCostUsd: number;
+  callCount: number;
+} {
+  const entries = loadLog();
+  let totalTokens = 0;
+  let totalCostUsd = 0;
+  for (const e of entries) {
+    totalTokens += e.totalTokens;
+    totalCostUsd += e.costUsd;
+  }
+  return {
+    totalTokens,
+    totalCostUsd: Math.round(totalCostUsd * 1_000_000) / 1_000_000,
+    callCount: entries.length,
+  };
 }
 
 export function summarizeDay(day: string): AiUsageDaySummary {

@@ -1,4 +1,4 @@
-import { Clapperboard, LogOut, Sparkles } from "lucide-react";
+import { Clapperboard, Coins, LogOut, Sparkles } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { AiUsageTodayBadge } from "./AiUsagePanel";
@@ -10,21 +10,30 @@ function cn(...inputs: ClassValue[]) {
 type Props = {
   onOpenFlow: () => void;
   onOpenClone: () => void;
+  onOpenUsage: () => void;
   onLogout: () => void;
   userEmail?: string | null;
+  userId?: string;
 };
 
-export function ProductHub({ onOpenFlow, onOpenClone, onLogout, userEmail }: Props) {
+export function ProductHub({
+  onOpenFlow,
+  onOpenClone,
+  onOpenUsage,
+  onLogout,
+  userEmail,
+  userId,
+}: Props) {
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans">
       <header className="bg-white border-b border-gray-200">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="bg-orange-500 p-1.5 rounded-lg">
               <Sparkles className="w-5 h-5 text-white" />
             </div>
             <span className="font-bold text-lg">Video Flow</span>
-            <AiUsageTodayBadge />
+            <AiUsageTodayBadge userId={userId} />
           </div>
           <button
             type="button"
@@ -78,9 +87,28 @@ export function ProductHub({ onOpenFlow, onOpenClone, onLogout, userEmail }: Pro
             <h2 className="text-xl font-bold mb-2">Clone Video</h2>
             <p className="text-sm text-gray-600 leading-relaxed">
               Upload video, split frames, analyze chno tbeddel scene b scene, w generi prompts + images
-              l-Google Veo.
+              l-Veo. Auto-save f DB.
             </p>
-            <span className="inline-block mt-5 text-sm font-semibold text-violet-600">Bda →</span>
+            <span className="inline-block mt-5 text-sm font-semibold text-violet-600">Fte7 →</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenUsage}
+            className={cn(
+              "text-left bg-white rounded-3xl border border-gray-100 shadow-sm p-6 sm:p-8 sm:col-span-2",
+              "hover:border-emerald-200 hover:shadow-md transition-all group"
+            )}
+          >
+            <div className="bg-emerald-600 w-14 h-14 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-105 transition-transform">
+              <Coins className="w-7 h-7 text-white" />
+            </div>
+            <h2 className="text-xl font-bold mb-2">Usage & balance</h2>
+            <p className="text-sm text-gray-600 leading-relaxed">
+              Chof tokens w cost dial kol API call, total dial l-youm w d-chhr, budget remaining, w
+              clone projects li t-sauvegardaw.
+            </p>
+            <span className="inline-block mt-5 text-sm font-semibold text-emerald-600">Fte7 →</span>
           </button>
         </div>
       </main>

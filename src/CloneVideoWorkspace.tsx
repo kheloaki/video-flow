@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clapperboard,
+  Cloud,
   Copy,
   Download,
   Loader2,
@@ -18,8 +19,14 @@ import JSZip from "jszip";
 import { buildCloneDebutFinPrompts, buildCloneFullScript, CLONE_VEO_SCENE_SECONDS } from "./utils/buildCloneFullScript";
 import { postAiJson } from "./utils/postAiJson";
 import { prepareVisionImageUrl } from "./utils/prepareVisionImageUrl";
-import { isAiUsagePayload, type AiUsagePayload } from "./utils/aiUsage";
+import { isAiUsagePayload, setUsagePersistContext, type AiUsagePayload } from "./utils/aiUsage";
 import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
+import {
+  createCloneProject,
+  updateCloneProject,
+  type CloneProjectData,
+  type StoredCloneScene,
+} from "./utils/cloneProjectDb";
 import {
   autoSceneBoundaries,
   downloadDataUrl,
@@ -39,6 +46,8 @@ type CloneScene = {
   sceneNumber: number;
   debut: ExtractedFrame;
   fin: ExtractedFrame;
+  debutUrl?: string;
+  finUrl?: string;
   analysis?: string;
   scenePackage?: Record<string, unknown>;
   veoPrompt?: string;
@@ -54,11 +63,42 @@ type CloneScene = {
 
 type Props = {
   onBack: () => void;
+  userId: string;
+  onOpenUsage?: () => void;
 };
 
 const STEP_LABELS = ["Split video", "Scenes", "Analyze", "Veo prompts"] as const;
 
-export default function CloneVideoWorkspace({ onBack }: Props) {
+function buildStoredScenes(scenes: CloneScene[]): StoredCloneScene[] {
+  return scenes.map((s) => ({
+    sceneNumber: s.sceneNumber,
+    debutIndex: s.debut.index,
+    finIndex: s.fin.index,
+    debutTimeSec: s.debut.timeSec,
+    finTimeSec: s.fin.timeSec,
+    debutUrl: s.debutUrl,
+    finUrl: s.finUrl,
+    analysis: s.analysis,
+    scenePackage: s.scenePackage,
+    veoPrompt: s.veoPrompt,
+    negativePrompt: s.negativePrompt,
+    parseError: s.parseError,
+    rawPackageText: s.rawPackageText,
+    usageAnalyze: s.usageAnalyze,
+    usagePrompt: s.usagePrompt,
+    analyzeStatus: s.analyzeStatus,
+    promptStatus: s.promptStatus,
+    error: s.error,
+  }));
+}
+
+function projectStatus(step: WizardStep, scenes: CloneScene[]): string {
+  if (scenes.some((s) => s.promptStatus === "done")) return "complete";
+  if (scenes.some((s) => s.analyzeStatus === "done")) return "analyzed";
+  return step >= 2 ? "scenes" : "draft";
+}
+
+export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Props) {
   const [step, setStep] = useState<WizardStep>(1);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
@@ -77,7 +117,74 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
   const [generateProgress, setGenerateProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const toastTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    setUsagePersistContext(
+      projectId
+        ? { userId, projectType: "clone", projectId }
+        : { userId, projectType: "clone" }
+    );
+    return () => setUsagePersistContext(userId ? { userId } : null);
+  }, [userId, projectId]);
+
+  const persistProject = useCallback(
+    async (opts: { step: WizardStep; scenesOverride?: CloneScene[] }) => {
+      if (!userId || !videoFile) return;
+      setSaveStatus("saving");
+      const scenesForSave = opts.scenesOverride ?? scenes;
+      const data: CloneProjectData = {
+        extractMode,
+        frameCount,
+        intervalSec,
+        sceneCount,
+        boundaryIndices,
+        frameMeta: frames.map((f) => ({ id: f.id, index: f.index, timeSec: f.timeSec })),
+        scenes: buildStoredScenes(scenesForSave),
+      };
+      const status = projectStatus(opts.step, scenesForSave);
+      try {
+        if (projectId) {
+          await updateCloneProject(projectId, userId, {
+            step: opts.step,
+            durationSec: duration,
+            status,
+            data,
+          });
+        } else {
+          const created = await createCloneProject(userId, {
+            name: videoFile.name.replace(/\.[^.]+$/, "") || "Clone project",
+            sourceVideoName: videoFile.name,
+            durationSec: duration,
+            step: opts.step,
+            status,
+            data,
+          });
+          setProjectId(created.id);
+        }
+        setSaveStatus("saved");
+        window.setTimeout(() => setSaveStatus("idle"), 2000);
+      } catch (e) {
+        console.error("clone project save", e);
+        setSaveStatus("error");
+      }
+    },
+    [
+      userId,
+      videoFile,
+      scenes,
+      extractMode,
+      frameCount,
+      intervalSec,
+      sceneCount,
+      boundaryIndices,
+      frames,
+      duration,
+      projectId,
+    ]
+  );
 
   const showCopyToast = useCallback((msg: string) => {
     setCopyToast(msg);
@@ -106,6 +213,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
     setFrames([]);
     setBoundaryIndices([]);
     setScenes([]);
+    setProjectId(null);
     setStep(1);
     setError(null);
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
@@ -130,6 +238,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
       const sc = Math.min(10, Math.max(2, parseInt(sceneCount, 10) || 6));
       const bounds = autoSceneBoundaries(result.frames.length, sc);
       setBoundaryIndices(bounds);
+      void persistProject({ step: 1 });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Mouchkil f-extract frames.");
     } finally {
@@ -191,17 +300,17 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
       setError("Khass 2 boundaries au moins bach tkon scene wa7da.");
       return;
     }
-    setScenes(
-      scenePairs.map((p) => ({
-        sceneNumber: p.sceneNumber,
-        debut: p.debut,
-        fin: p.fin,
-        analyzeStatus: "idle",
-        promptStatus: "idle",
-      }))
-    );
+    const newScenes = scenePairs.map((p) => ({
+      sceneNumber: p.sceneNumber,
+      debut: p.debut,
+      fin: p.fin,
+      analyzeStatus: "idle" as const,
+      promptStatus: "idle" as const,
+    }));
+    setScenes(newScenes);
     setError(null);
     setStep(3);
+    void persistProject({ step: 3, scenesOverride: newScenes });
   };
 
   const runAnalyzeAll = async () => {
@@ -241,6 +350,8 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
         );
         next[i] = {
           ...next[i],
+          debutUrl: debutImageUrl.startsWith("https://") ? debutImageUrl : undefined,
+          finUrl: finImageUrl.startsWith("https://") ? finImageUrl : undefined,
           analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
           usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : undefined,
           analyzeStatus: "done",
@@ -255,7 +366,12 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
       setScenes([...next]);
     }
     setIsAnalyzing(false);
-    if (next.every((s) => s.analyzeStatus === "done")) setStep(4);
+    if (next.every((s) => s.analyzeStatus === "done")) {
+      setStep(4);
+      void persistProject({ step: 4, scenesOverride: next });
+    } else {
+      void persistProject({ step: 3, scenesOverride: next });
+    }
   };
 
   const runGeneratePrompts = async () => {
@@ -332,6 +448,7 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
     }
     setIsGenerating(false);
     setGenerateProgress(null);
+    void persistProject({ step: 4, scenesOverride: next });
   };
 
   const downloadScenePairZip = async (scene: CloneScene) => {
@@ -366,7 +483,27 @@ export default function CloneVideoWorkspace({ onBack }: Props) {
             <Clapperboard className="w-5 h-5 text-white" />
           </div>
           <h1 className="font-bold text-lg">Clone Video</h1>
-          <AiUsageTodayBadge />
+          <AiUsageTodayBadge userId={userId} />
+          {saveStatus === "saving" ? (
+            <span className="text-[10px] text-violet-600 flex items-center gap-1">
+              <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+            </span>
+          ) : saveStatus === "saved" ? (
+            <span className="text-[10px] text-green-700 flex items-center gap-1">
+              <Cloud className="w-3 h-3" /> Saved
+            </span>
+          ) : saveStatus === "error" ? (
+            <span className="text-[10px] text-red-600">Save failed</span>
+          ) : null}
+          {onOpenUsage ? (
+            <button
+              type="button"
+              onClick={onOpenUsage}
+              className="text-[11px] font-medium text-emerald-700 hover:underline ml-auto sm:ml-0"
+            >
+              Usage →
+            </button>
+          ) : null}
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-wrap gap-2">
           {STEP_LABELS.map((label, i) => {
