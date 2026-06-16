@@ -118,6 +118,16 @@ export async function extractVideoFrames(
   }
 }
 
+/** Max scenes in Clone Video (also limited by frame count − 1). */
+export const MAX_CLONE_SCENES = 40;
+export const MIN_CLONE_SCENES = 2;
+
+export function clampCloneSceneCount(raw: number, frameCount = 120): number {
+  const maxByFrames = Math.max(MIN_CLONE_SCENES, frameCount - 1);
+  const cap = Math.min(MAX_CLONE_SCENES, maxByFrames);
+  return Math.min(cap, Math.max(MIN_CLONE_SCENES, raw));
+}
+
 /** Pick boundary frame indices for N scenes (N pairs of consecutive boundaries). */
 export function autoSceneBoundaries(frameCount: number, sceneCount: number): number[] {
   const n = Math.max(1, frameCount);

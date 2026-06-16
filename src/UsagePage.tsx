@@ -15,6 +15,7 @@ import { listCloneProjects, type CloneProject } from "./utils/cloneProjectDb.ts"
 type Props = {
   userId: string;
   onBack: () => void;
+  onContinueClone?: (projectId: string) => void;
 };
 
 function DayRow({ s }: { s: AiUsageDaySummary }) {
@@ -36,7 +37,7 @@ function DayRow({ s }: { s: AiUsageDaySummary }) {
   );
 }
 
-export default function UsagePage({ userId, onBack }: Props) {
+export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
   const [loading, setLoading] = useState(true);
   const [balance, setBalance] = useState<UsageBalanceSummary | null>(null);
   const [days, setDays] = useState<AiUsageDaySummary[]>([]);
@@ -274,11 +275,20 @@ export default function UsagePage({ userId, onBack }: Props) {
                           Updated {new Date(p.updatedAt).toLocaleString()}
                         </div>
                       </div>
-                      <div className="text-right tabular-nums">
+                      <div className="text-right tabular-nums flex flex-col items-end gap-1">
                         <div className="text-sm font-semibold text-emerald-700">
                           {formatCostUsd(p.totalCostUsd)}
                         </div>
                         <div className="text-[10px] text-gray-500">project AI cost</div>
+                        {onContinueClone ? (
+                          <button
+                            type="button"
+                            onClick={() => onContinueClone(p.id)}
+                            className="text-sm font-semibold text-violet-700 hover:underline"
+                          >
+                            Continue →
+                          </button>
+                        ) : null}
                       </div>
                     </li>
                   ))}

@@ -1689,6 +1689,7 @@ export default function App() {
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   
   const [productView, setProductView] = useState<"hub" | "flow" | "clone" | "usage">("hub");
+  const [resumeCloneProjectId, setResumeCloneProjectId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
     "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
   >(() => workspaceDraft?.activeTab ?? "products");
@@ -4459,7 +4460,10 @@ ${b.styleExamplesBlock}`;
         userEmail={user.email}
         userId={user.id}
         onOpenFlow={() => setProductView("flow")}
-        onOpenClone={() => setProductView("clone")}
+        onOpenClone={() => {
+          setResumeCloneProjectId(null);
+          setProductView("clone");
+        }}
         onOpenUsage={() => setProductView("usage")}
         onLogout={() => void handleLogout()}
       />
@@ -4468,7 +4472,14 @@ ${b.styleExamplesBlock}`;
 
   if (productView === "usage") {
     return (
-      <UsagePage userId={user.id} onBack={() => setProductView("hub")} />
+      <UsagePage
+        userId={user.id}
+        onBack={() => setProductView("hub")}
+        onContinueClone={(id) => {
+          setResumeCloneProjectId(id);
+          setProductView("clone");
+        }}
+      />
     );
   }
 
@@ -4476,7 +4487,11 @@ ${b.styleExamplesBlock}`;
     return (
       <CloneVideoWorkspace
         userId={user.id}
-        onBack={() => setProductView("hub")}
+        initialProjectId={resumeCloneProjectId}
+        onBack={() => {
+          setResumeCloneProjectId(null);
+          setProductView("hub");
+        }}
         onOpenUsage={() => setProductView("usage")}
       />
     );

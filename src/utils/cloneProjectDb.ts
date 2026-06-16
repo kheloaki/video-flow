@@ -84,6 +84,21 @@ export function sumSceneUsage(scenes: StoredCloneScene[]): number {
   return Math.round(total * 1_000_000) / 1_000_000;
 }
 
+export async function fetchCloneProject(
+  projectId: string,
+  ownerId: string
+): Promise<CloneProject | null> {
+  const { data, error } = await supabase
+    .from("clone_projects")
+    .select("*")
+    .eq("id", projectId)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return mapRow(data as Record<string, unknown>);
+}
+
 export async function listCloneProjects(ownerId: string): Promise<CloneProject[]> {
   const { data, error } = await supabase
     .from("clone_projects")

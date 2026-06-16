@@ -23,14 +23,21 @@ import { isAiUsagePayload, setUsagePersistContext, type AiUsagePayload } from ".
 import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
 import {
   createCloneProject,
+  fetchCloneProject,
+  listCloneProjects,
   updateCloneProject,
+  type CloneProject,
   type CloneProjectData,
   type StoredCloneScene,
+  type StoredFrameMeta,
 } from "./utils/cloneProjectDb";
 import {
   autoSceneBoundaries,
+  clampCloneSceneCount,
   downloadDataUrl,
   extractVideoFrames,
+  MAX_CLONE_SCENES,
+  MIN_CLONE_SCENES,
   scenesFromBoundaries,
   type ExtractedFrame,
   type FrameExtractMode,
@@ -65,9 +72,98 @@ type Props = {
   onBack: () => void;
   userId: string;
   onOpenUsage?: () => void;
+  /** Open a saved clone project from Usage page or history. */
+  initialProjectId?: string | null;
 };
 
 const STEP_LABELS = ["Split video", "Scenes", "Analyze", "Veo prompts"] as const;
+
+const PLACEHOLDER_FRAME =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='16' fill='%23e5e7eb'/%3E";
+
+function sceneImageSrc(dataUrl: string, httpsUrl?: string): string {
+  if (httpsUrl?.startsWith("https://")) return httpsUrl;
+  return dataUrl;
+}
+
+function frameFromMeta(meta: StoredFrameMeta, httpsUrl?: string): ExtractedFrame {
+  return {
+    id: meta.id,
+    index: meta.index,
+    timeSec: meta.timeSec,
+    dataUrl: httpsUrl?.startsWith("https://") ? httpsUrl : PLACEHOLDER_FRAME,
+  };
+}
+
+function restoreCloneScene(stored: StoredCloneScene, frames: ExtractedFrame[]): CloneScene {
+  const debut =
+    frames[stored.debutIndex] ??
+    frameFromMeta(
+      { id: `d-${stored.sceneNumber}`, index: stored.debutIndex, timeSec: stored.debutTimeSec },
+      stored.debutUrl
+    );
+  const fin =
+    frames[stored.finIndex] ??
+    frameFromMeta(
+      { id: `f-${stored.sceneNumber}`, index: stored.finIndex, timeSec: stored.finTimeSec },
+      stored.finUrl
+    );
+  return {
+    sceneNumber: stored.sceneNumber,
+    debut,
+    fin,
+    debutUrl: stored.debutUrl,
+    finUrl: stored.finUrl,
+    analysis: stored.analysis,
+    scenePackage: stored.scenePackage,
+    veoPrompt: stored.veoPrompt,
+    negativePrompt: stored.negativePrompt,
+    parseError: stored.parseError,
+    rawPackageText: stored.rawPackageText,
+    usageAnalyze: stored.usageAnalyze,
+    usagePrompt: stored.usagePrompt,
+    analyzeStatus:
+      stored.analyzeStatus === "loading" ||
+      stored.analyzeStatus === "done" ||
+      stored.analyzeStatus === "error"
+        ? stored.analyzeStatus
+        : "idle",
+    promptStatus:
+      stored.promptStatus === "loading" ||
+      stored.promptStatus === "done" ||
+      stored.promptStatus === "error"
+        ? stored.promptStatus
+        : "idle",
+    error: stored.error,
+  };
+}
+
+function applyProjectData(project: CloneProject): {
+  step: WizardStep;
+  frames: ExtractedFrame[];
+  scenes: CloneScene[];
+  settings: Pick<
+    CloneProjectData,
+    "extractMode" | "frameCount" | "intervalSec" | "sceneCount" | "boundaryIndices"
+  >;
+} {
+  const { data } = project;
+  const frames = data.frameMeta.map((m) => frameFromMeta(m));
+  const scenes = data.scenes.map((s) => restoreCloneScene(s, frames));
+  const step = Math.min(4, Math.max(1, project.step)) as WizardStep;
+  return {
+    step,
+    frames,
+    scenes,
+    settings: {
+      extractMode: data.extractMode,
+      frameCount: data.frameCount,
+      intervalSec: data.intervalSec,
+      sceneCount: data.sceneCount,
+      boundaryIndices: data.boundaryIndices,
+    },
+  };
+}
 
 function buildStoredScenes(scenes: CloneScene[]): StoredCloneScene[] {
   return scenes.map((s) => ({
@@ -98,7 +194,12 @@ function projectStatus(step: WizardStep, scenes: CloneScene[]): string {
   return step >= 2 ? "scenes" : "draft";
 }
 
-export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Props) {
+export default function CloneVideoWorkspace({
+  onBack,
+  userId,
+  onOpenUsage,
+  initialProjectId,
+}: Props) {
   const [step, setStep] = useState<WizardStep>(1);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
@@ -118,6 +219,10 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
   const [error, setError] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [savedProjects, setSavedProjects] = useState<CloneProject[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
+  const [resumedSourceName, setResumedSourceName] = useState<string | null>(null);
+  const [needsVideoResync, setNeedsVideoResync] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const toastTimer = useRef<number | null>(null);
 
@@ -132,7 +237,8 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
 
   const persistProject = useCallback(
     async (opts: { step: WizardStep; scenesOverride?: CloneScene[] }) => {
-      if (!userId || !videoFile) return;
+      if (!userId) return;
+      if (!videoFile && !projectId) return;
       setSaveStatus("saving");
       const scenesForSave = opts.scenesOverride ?? scenes;
       const data: CloneProjectData = {
@@ -145,6 +251,10 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
         scenes: buildStoredScenes(scenesForSave),
       };
       const status = projectStatus(opts.step, scenesForSave);
+      const name =
+        videoFile?.name.replace(/\.[^.]+$/, "") ||
+        resumedSourceName?.replace(/\.[^.]+$/, "") ||
+        "Clone project";
       try {
         if (projectId) {
           await updateCloneProject(projectId, userId, {
@@ -155,8 +265,8 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
           });
         } else {
           const created = await createCloneProject(userId, {
-            name: videoFile.name.replace(/\.[^.]+$/, "") || "Clone project",
-            sourceVideoName: videoFile.name,
+            name,
+            sourceVideoName: videoFile?.name ?? resumedSourceName ?? undefined,
             durationSec: duration,
             step: opts.step,
             status,
@@ -166,6 +276,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
         }
         setSaveStatus("saved");
         window.setTimeout(() => setSaveStatus("idle"), 2000);
+        void listCloneProjects(userId).then(setSavedProjects).catch(() => {});
       } catch (e) {
         console.error("clone project save", e);
         setSaveStatus("error");
@@ -174,6 +285,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
     [
       userId,
       videoFile,
+      resumedSourceName,
       scenes,
       extractMode,
       frameCount,
@@ -185,6 +297,65 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
       projectId,
     ]
   );
+
+  const loadSavedProject = useCallback(
+    async (id: string) => {
+      setError(null);
+      setLoadingProjects(true);
+      try {
+        const project = await fetchCloneProject(id, userId);
+        if (!project) {
+          setError("Project ma-l9inach f DB.");
+          return;
+        }
+        const applied = applyProjectData(project);
+        setProjectId(project.id);
+        setResumedSourceName(project.sourceVideoName);
+        setNeedsVideoResync(true);
+        setVideoFile(null);
+        if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+        setVideoPreviewUrl(null);
+        setDuration(project.durationSec ?? 0);
+        setExtractMode(applied.settings.extractMode);
+        setFrameCount(applied.settings.frameCount);
+        setIntervalSec(applied.settings.intervalSec);
+        setSceneCount(applied.settings.sceneCount);
+        setBoundaryIndices(applied.settings.boundaryIndices);
+        setFrames(applied.frames);
+        setScenes(applied.scenes);
+        setStep(applied.step);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load project");
+      } finally {
+        setLoadingProjects(false);
+      }
+    },
+    [userId, videoPreviewUrl]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingProjects(true);
+    void listCloneProjects(userId)
+      .then((rows) => {
+        if (!cancelled) setSavedProjects(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setSavedProjects([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingProjects(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (initialProjectId) {
+      void loadSavedProject(initialProjectId);
+    }
+  }, [initialProjectId, loadSavedProject]);
 
   const showCopyToast = useCallback((msg: string) => {
     setCopyToast(msg);
@@ -207,17 +378,76 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
     [frames, boundaryIndices]
   );
 
-  const handleVideoPick = (file: File | null) => {
+  const handleVideoPick = (file: File | null, opts?: { resume?: boolean }) => {
     if (!file) return;
     setVideoFile(file);
+    setError(null);
+    if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+    setVideoPreviewUrl(URL.createObjectURL(file));
+    if (opts?.resume) {
+      setNeedsVideoResync(true);
+      setResumedSourceName((prev) => prev ?? file.name);
+      return;
+    }
     setFrames([]);
     setBoundaryIndices([]);
     setScenes([]);
     setProjectId(null);
+    setResumedSourceName(null);
+    setNeedsVideoResync(false);
     setStep(1);
+  };
+
+  const resyncFramesFromVideo = async () => {
+    if (!videoFile) {
+      setError("3afak re-uploadi l-video dial l-project.");
+      return;
+    }
+    setIsExtracting(true);
     setError(null);
-    if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
-    setVideoPreviewUrl(URL.createObjectURL(file));
+    try {
+      const result = await extractVideoFrames(videoFile, {
+        mode: extractMode,
+        frameCount: parseInt(frameCount, 10) || 24,
+        intervalSec: parseFloat(intervalSec) || 1,
+      });
+      setDuration(result.duration);
+      setFrames(result.frames);
+      const savedBounds = boundaryIndices.filter((i) => i >= 0 && i < result.frames.length);
+      const bounds =
+        savedBounds.length >= 2
+          ? savedBounds
+          : autoSceneBoundaries(
+              result.frames.length,
+              clampCloneSceneCount(parseInt(sceneCount, 10) || 6, result.frames.length)
+            );
+      setBoundaryIndices(bounds);
+      const pairs = scenesFromBoundaries(result.frames, bounds);
+      const merged = pairs.map((p) => {
+        const stored = scenes.find((s) => s.sceneNumber === p.sceneNumber);
+        if (!stored) {
+          return {
+            sceneNumber: p.sceneNumber,
+            debut: p.debut,
+            fin: p.fin,
+            analyzeStatus: "idle" as const,
+            promptStatus: "idle" as const,
+          };
+        }
+        return {
+          ...stored,
+          debut: p.debut,
+          fin: p.fin,
+        };
+      });
+      setScenes(merged);
+      setNeedsVideoResync(false);
+      void persistProject({ step, scenesOverride: merged });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Mouchkil f re-sync frames.");
+    } finally {
+      setIsExtracting(false);
+    }
   };
 
   const runExtract = async () => {
@@ -235,7 +465,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
       });
       setDuration(result.duration);
       setFrames(result.frames);
-      const sc = Math.min(10, Math.max(2, parseInt(sceneCount, 10) || 6));
+      const sc = clampCloneSceneCount(parseInt(sceneCount, 10) || 6, result.frames.length);
       const bounds = autoSceneBoundaries(result.frames.length, sc);
       setBoundaryIndices(bounds);
       void persistProject({ step: 1 });
@@ -247,7 +477,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
   };
 
   const applyAutoBoundaries = () => {
-    const sc = Math.min(10, Math.max(2, parseInt(sceneCount, 10) || 6));
+    const sc = clampCloneSceneCount(parseInt(sceneCount, 10) || 6, frames.length);
     setBoundaryIndices(autoSceneBoundaries(frames.length, sc));
   };
 
@@ -315,6 +545,10 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
 
   const runAnalyzeAll = async () => {
     if (scenes.length === 0) return;
+    if (needsVideoResync) {
+      setError("Re-upload video w dir Re-sync frames qbel analyze.");
+      return;
+    }
     setIsAnalyzing(true);
     setError(null);
     const next = [...scenes];
@@ -534,6 +768,77 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+        {needsVideoResync && projectId ? (
+          <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl text-sm text-amber-900 space-y-3">
+            <p>
+              Project <span className="font-semibold">{resumedSourceName ?? "saved"}</span> — re-upload
+              l-video bach t-restauri frames w t-continuer analyze/prompts.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <label className="inline-flex items-center gap-2 px-3 py-2 bg-white border border-amber-200 rounded-lg cursor-pointer hover:bg-amber-50/80 text-sm font-medium">
+                <input
+                  type="file"
+                  accept="video/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleVideoPick(f, { resume: true });
+                    e.target.value = "";
+                  }}
+                />
+                <Upload className="w-4 h-4" />
+                Re-upload video
+              </label>
+              {videoFile ? (
+                <button
+                  type="button"
+                  onClick={() => void resyncFramesFromVideo()}
+                  disabled={isExtracting}
+                  className="inline-flex items-center gap-2 px-3 py-2 bg-violet-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                >
+                  {isExtracting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  Re-sync frames
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {savedProjects.length > 0 ? (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 space-y-3">
+            <h2 className="font-semibold text-gray-800">Saved clone projects</h2>
+            {loadingProjects ? (
+              <p className="text-sm text-gray-500 flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+              </p>
+            ) : (
+              <ul className="space-y-2 max-h-56 overflow-y-auto">
+                {savedProjects.map((p) => (
+                  <li
+                    key={p.id}
+                    className="flex flex-wrap items-center justify-between gap-2 p-3 bg-gray-50 rounded-xl border border-gray-100"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-900 truncate">{p.name}</div>
+                      <div className="text-xs text-gray-500">
+                        Step {p.step} · {p.data.scenes.length} scene(s) ·{" "}
+                        {new Date(p.updatedAt).toLocaleString()}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void loadSavedProject(p.id)}
+                      className="shrink-0 text-sm font-semibold text-violet-700 hover:underline"
+                    >
+                      Continue →
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : null}
+
         {error ? (
           <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-start gap-2 text-red-600 text-sm">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -610,18 +915,18 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
                 )}
                 <div>
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                    Scenes visées (2–10)
+                    Scenes visées ({MIN_CLONE_SCENES}–{MAX_CLONE_SCENES})
                   </label>
                   <input
                     type="number"
-                    min={2}
-                    max={10}
+                    min={MIN_CLONE_SCENES}
+                    max={MAX_CLONE_SCENES}
                     className="mt-1 w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl"
                     value={sceneCount}
                     onChange={(e) => setSceneCount(e.target.value)}
                   />
                   <p className="text-[11px] text-gray-500 mt-1">
-                    Step 2: boundaries auto — ila 3ndk bzaf frames, n-grouperiw l-8 scenes max.
+                    Step 2: boundaries auto — max {MAX_CLONE_SCENES} scenes (wla 9ad ma 3ndk frames).
                   </p>
                 </div>
               </div>
@@ -787,8 +1092,8 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
                     </div>
                   </div>
                   <div className="flex gap-2">
-                    <img src={s.debut.dataUrl} alt="" className="w-16 aspect-[9/16] object-cover rounded-lg" />
-                    <img src={s.fin.dataUrl} alt="" className="w-16 aspect-[9/16] object-cover rounded-lg" />
+                    <img src={sceneImageSrc(s.debut.dataUrl, s.debutUrl)} alt="" className="w-16 aspect-[9/16] object-cover rounded-lg" />
+                    <img src={sceneImageSrc(s.fin.dataUrl, s.finUrl)} alt="" className="w-16 aspect-[9/16] object-cover rounded-lg" />
                   </div>
                   {s.analysis ? (
                     <details className="text-sm rounded-lg border border-violet-100 bg-violet-50/30 group" open>
@@ -867,7 +1172,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
                 </div>
                 <div className="flex gap-4">
                   <div className="text-center">
-                    <img src={s.debut.dataUrl} alt="" className="w-24 aspect-[9/16] object-cover rounded-lg border" />
+                    <img src={sceneImageSrc(s.debut.dataUrl, s.debutUrl)} alt="" className="w-24 aspect-[9/16] object-cover rounded-lg border" />
                     <button
                       type="button"
                       className="text-xs text-violet-600 mt-1"
@@ -879,7 +1184,7 @@ export default function CloneVideoWorkspace({ onBack, userId, onOpenUsage }: Pro
                     </button>
                   </div>
                   <div className="text-center">
-                    <img src={s.fin.dataUrl} alt="" className="w-24 aspect-[9/16] object-cover rounded-lg border" />
+                    <img src={sceneImageSrc(s.fin.dataUrl, s.finUrl)} alt="" className="w-24 aspect-[9/16] object-cover rounded-lg border" />
                     <button
                       type="button"
                       className="text-xs text-violet-600 mt-1"
