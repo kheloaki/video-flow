@@ -37,7 +37,9 @@ import {
 } from 'lucide-react';
 import CloneVideoWorkspace from "./CloneVideoWorkspace.tsx";
 import UsagePage from "./UsagePage.tsx";
+import AdminUsagePage from "./AdminUsagePage.tsx";
 import { ProductHub } from "./components/ProductHub.tsx";
+import { ensureProfile, fetchIsAdmin } from "./utils/profileDb.ts";
 import { AiUsagePanel, AiUsageTodayBadge } from "./components/AiUsagePanel.tsx";
 import { recordAiUsageFromResponse, setUsagePersistContext } from "./utils/aiUsage.ts";
 import { clsx, type ClassValue } from 'clsx';
@@ -1688,7 +1690,8 @@ export default function App() {
   const [videos, setVideos] = useState<VideoData[]>([]);
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   
-  const [productView, setProductView] = useState<"hub" | "flow" | "clone" | "usage">("hub");
+  const [productView, setProductView] = useState<"hub" | "flow" | "clone" | "usage" | "admin">("hub");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [resumeCloneProjectId, setResumeCloneProjectId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
     "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
@@ -2253,6 +2256,26 @@ export default function App() {
       setUsagePersistContext(null);
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setIsAdmin(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        await ensureProfile(user.id, user.email);
+        const admin = await fetchIsAdmin(user.id);
+        if (!cancelled) setIsAdmin(admin);
+      } catch {
+        if (!cancelled) setIsAdmin(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.email]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4459,12 +4482,14 @@ ${b.styleExamplesBlock}`;
       <ProductHub
         userEmail={user.email}
         userId={user.id}
+        isAdmin={isAdmin}
         onOpenFlow={() => setProductView("flow")}
         onOpenClone={() => {
           setResumeCloneProjectId(null);
           setProductView("clone");
         }}
         onOpenUsage={() => setProductView("usage")}
+        onOpenAdmin={() => setProductView("admin")}
         onLogout={() => void handleLogout()}
       />
     );
@@ -4481,6 +4506,10 @@ ${b.styleExamplesBlock}`;
         }}
       />
     );
+  }
+
+  if (productView === "admin") {
+    return <AdminUsagePage onBack={() => setProductView("hub")} />;
   }
 
   if (productView === "clone") {

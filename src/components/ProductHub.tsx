@@ -1,4 +1,4 @@
-import { Clapperboard, Coins, LogOut, Sparkles } from "lucide-react";
+import { Clapperboard, Coins, LogOut, Shield, Sparkles } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { AiUsageTodayBadge } from "./AiUsagePanel";
@@ -11,18 +11,22 @@ type Props = {
   onOpenFlow: () => void;
   onOpenClone: () => void;
   onOpenUsage: () => void;
+  onOpenAdmin?: () => void;
   onLogout: () => void;
   userEmail?: string | null;
   userId?: string;
+  isAdmin?: boolean;
 };
 
 export function ProductHub({
   onOpenFlow,
   onOpenClone,
   onOpenUsage,
+  onOpenAdmin,
   onLogout,
   userEmail,
   userId,
+  isAdmin,
 }: Props) {
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans">
@@ -110,6 +114,26 @@ export function ProductHub({
             </p>
             <span className="inline-block mt-5 text-sm font-semibold text-emerald-600">Fte7 →</span>
           </button>
+
+          {isAdmin && onOpenAdmin ? (
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className={cn(
+                "text-left bg-white rounded-3xl border border-gray-100 shadow-sm p-6 sm:p-8 sm:col-span-2",
+                "hover:border-slate-300 hover:shadow-md transition-all group"
+              )}
+            >
+              <div className="bg-slate-800 w-14 h-14 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-105 transition-transform">
+                <Shield className="w-7 h-7 text-white" />
+              </div>
+              <h2 className="text-xl font-bold mb-2">Admin — all users usage</h2>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                Chof kolchi: API calls, tokens, cost per user w recent activity dial kol l-accounts.
+              </p>
+              <span className="inline-block mt-5 text-sm font-semibold text-slate-700">Fte7 →</span>
+            </button>
+          ) : null}
         </div>
       </main>
     </div>

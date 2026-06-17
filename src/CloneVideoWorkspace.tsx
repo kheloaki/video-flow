@@ -22,6 +22,11 @@ import { prepareVisionImageUrl } from "./utils/prepareVisionImageUrl";
 import { isAiUsagePayload, setUsagePersistContext, type AiUsagePayload } from "./utils/aiUsage";
 import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
 import {
+  FlowExtensionBar,
+  FlowExtensionSceneButton,
+  toFlowSceneExport,
+} from "./components/FlowExtensionBar";
+import {
   createCloneProject,
   fetchCloneProject,
   listCloneProjects,
@@ -42,6 +47,7 @@ import {
   type ExtractedFrame,
   type FrameExtractMode,
 } from "./utils/videoFrames";
+import { CLONE_AI_CONCURRENCY, runWithConcurrency } from "./utils/runWithConcurrency";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -77,6 +83,146 @@ type Props = {
 };
 
 const STEP_LABELS = ["Split video", "Scenes", "Analyze", "Veo prompts"] as const;
+
+type FlowSettings = {
+  aspectRatio: string;
+  model: string;
+  duration: string;
+  outputs: string;
+  videoMode: string;
+  autoRun: boolean;
+};
+
+const DEFAULT_FLOW_SETTINGS: FlowSettings = {
+  aspectRatio: "9:16",
+  model: "Veo 3.1",
+  duration: "8",
+  outputs: "1",
+  videoMode: "Frames to Video",
+  autoRun: true,
+};
+
+const FLOW_SETTINGS_KEY = "vf_flow_settings";
+
+function loadFlowSettings(): FlowSettings {
+  try {
+    const raw = localStorage.getItem(FLOW_SETTINGS_KEY);
+    if (!raw) return DEFAULT_FLOW_SETTINGS;
+    return { ...DEFAULT_FLOW_SETTINGS, ...JSON.parse(raw) };
+  } catch {
+    return DEFAULT_FLOW_SETTINGS;
+  }
+}
+
+function saveFlowSettings(partial: Partial<FlowSettings>) {
+  const next = { ...loadFlowSettings(), ...partial };
+  localStorage.setItem(FLOW_SETTINGS_KEY, JSON.stringify(next));
+  return next;
+}
+
+function ClonePipelineBoard({
+  videoName,
+  framesCount,
+  scenes,
+  step,
+  isExtracting,
+  isAnalyzing,
+  isGenerating,
+  autoPipeline,
+}: {
+  videoName: string | null;
+  framesCount: number;
+  scenes: CloneScene[];
+  step: WizardStep;
+  isExtracting: boolean;
+  isAnalyzing: boolean;
+  isGenerating: boolean;
+  autoPipeline: boolean;
+}) {
+  if (!videoName && framesCount === 0 && scenes.length === 0 && step === 1) return null;
+
+  const total = scenes.length;
+  const analyzed = scenes.filter((s) => s.analyzeStatus === "done").length;
+  const analyzeErrors = scenes.filter((s) => s.analyzeStatus === "error").length;
+  const prompted = scenes.filter((s) => s.promptStatus === "done").length;
+  const promptErrors = scenes.filter((s) => s.promptStatus === "error").length;
+
+  const steps = [
+    {
+      label: "Video",
+      done: !!videoName,
+      active: false,
+      detail: videoName ?? "No video",
+    },
+    {
+      label: "Frames",
+      done: framesCount > 0,
+      active: isExtracting,
+      detail: framesCount > 0 ? `${framesCount} frames` : "—",
+    },
+    {
+      label: "Scenes",
+      done: total > 0,
+      active: step === 2 && total === 0,
+      detail: total ? `${total} scene(s)` : "—",
+    },
+    {
+      label: "Analyze",
+      done: total > 0 && analyzed === total,
+      active: isAnalyzing,
+      detail: total
+        ? analyzeErrors
+          ? `${analyzed}/${total} · ${analyzeErrors} err`
+          : `${analyzed}/${total}`
+        : "—",
+      error: analyzeErrors > 0,
+    },
+    {
+      label: "Veo prompts",
+      done: total > 0 && scenes.every((s) => !s.analysis?.trim() || s.promptStatus === "done"),
+      active: isGenerating,
+      detail: total
+        ? promptErrors
+          ? `${prompted}/${total} · ${promptErrors} err`
+          : `${prompted}/${total}`
+        : "—",
+      error: promptErrors > 0,
+    },
+  ];
+
+  return (
+    <div className="bg-white border-b border-gray-100">
+      <div className="max-w-5xl mx-auto px-4 py-3">
+        <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Pipeline status</h2>
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+          {steps.map((s) => (
+            <div
+              key={s.label}
+              className={cn(
+                "rounded-xl border px-2 py-2 text-center text-xs",
+                s.done
+                  ? "border-green-200 bg-green-50"
+                  : s.active
+                    ? "border-violet-300 bg-violet-50 ring-2 ring-violet-200"
+                    : s.error
+                      ? "border-red-200 bg-red-50"
+                      : "border-gray-200 bg-gray-50"
+              )}
+            >
+              <div className="font-bold text-[10px] uppercase text-gray-500">{s.label}</div>
+              <div className="font-semibold mt-1 truncate">{s.detail}</div>
+            </div>
+          ))}
+        </div>
+        <p className="text-[11px] text-gray-500 mt-2">
+          {autoPipeline
+            ? "Auto pipeline ON — upload video, set settings, then wait until all Veo prompts are done."
+            : "Manual mode — run Analyze and Generate prompts yourself."}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 const PLACEHOLDER_FRAME =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='16' fill='%23e5e7eb'/%3E";
@@ -224,6 +370,14 @@ export default function CloneVideoWorkspace({
   const [resumedSourceName, setResumedSourceName] = useState<string | null>(null);
   const [needsVideoResync, setNeedsVideoResync] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [autoPipeline, setAutoPipeline] = useState(() => {
+    try {
+      return localStorage.getItem("vf_auto_pipeline") !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [flowSettings, setFlowSettings] = useState<FlowSettings>(loadFlowSettings);
   const toastTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -378,6 +532,24 @@ export default function CloneVideoWorkspace({
     [frames, boundaryIndices]
   );
 
+  const flowExportScenes = useMemo(
+    () =>
+      scenes.map((s) =>
+        toFlowSceneExport(
+          s.sceneNumber,
+          sceneImageSrc(s.debut.dataUrl, s.debutUrl),
+          sceneImageSrc(s.fin.dataUrl, s.finUrl),
+          {
+            scenePackage: s.scenePackage,
+            analysis: s.analysis,
+            veoPrompt: s.veoPrompt,
+            negativePrompt: s.negativePrompt,
+          }
+        )
+      ),
+    [scenes]
+  );
+
   const handleVideoPick = (file: File | null, opts?: { resume?: boolean }) => {
     if (!file) return;
     setVideoFile(file);
@@ -468,7 +640,17 @@ export default function CloneVideoWorkspace({
       const sc = clampCloneSceneCount(parseInt(sceneCount, 10) || 6, result.frames.length);
       const bounds = autoSceneBoundaries(result.frames.length, sc);
       setBoundaryIndices(bounds);
-      void persistProject({ step: 1 });
+      const newScenes = scenesFromBoundaries(result.frames, bounds).map((p) => ({
+        sceneNumber: p.sceneNumber,
+        debut: p.debut,
+        fin: p.fin,
+        analyzeStatus: "idle" as const,
+        promptStatus: "idle" as const,
+      }));
+      setScenes(newScenes);
+      setStep(3);
+      void persistProject({ step: 3, scenesOverride: newScenes });
+      void runAnalyzeAll(newScenes);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Mouchkil f-extract frames.");
     } finally {
@@ -541,21 +723,26 @@ export default function CloneVideoWorkspace({
     setError(null);
     setStep(3);
     void persistProject({ step: 3, scenesOverride: newScenes });
+    void runAnalyzeAll(newScenes);
   };
 
-  const runAnalyzeAll = async () => {
-    if (scenes.length === 0) return;
+  const runAnalyzeAll = async (sourceScenes?: CloneScene[]) => {
+    const workScenes = sourceScenes ?? scenes;
+    if (workScenes.length === 0) return;
     if (needsVideoResync) {
       setError("Re-upload video w dir Re-sync frames qbel analyze.");
       return;
     }
     setIsAnalyzing(true);
     setError(null);
-    const next = [...scenes];
-    for (let i = 0; i < next.length; i++) {
-      const s = next[i];
-      next[i] = { ...s, analyzeStatus: "loading", error: undefined };
-      setScenes([...next]);
+    const next: CloneScene[] = workScenes.map((s) => ({
+      ...s,
+      analyzeStatus: "loading" as const,
+      error: undefined,
+    }));
+    setScenes([...next]);
+
+    const tasks = workScenes.map((s, i) => async () => {
       try {
         const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts({
           sceneNumber: s.sceneNumber,
@@ -598,26 +785,33 @@ export default function CloneVideoWorkspace({
         };
       }
       setScenes([...next]);
-    }
+    });
+
+    await runWithConcurrency(tasks, CLONE_AI_CONCURRENCY);
+
     setIsAnalyzing(false);
     if (next.every((s) => s.analyzeStatus === "done")) {
       setStep(4);
       void persistProject({ step: 4, scenesOverride: next });
+      if (autoPipeline) {
+        void runGeneratePrompts(next);
+      }
     } else {
       void persistProject({ step: 3, scenesOverride: next });
     }
   };
 
-  const runGeneratePrompts = async () => {
-    if (scenes.length === 0) return;
+  const runGeneratePrompts = async (sourceScenes?: CloneScene[]) => {
+    const workScenes = sourceScenes ?? scenes;
+    if (workScenes.length === 0) return;
     setIsGenerating(true);
     setGenerateProgress(null);
     setError(null);
 
     const refDuration =
-      duration > 0 ? duration : (scenes[scenes.length - 1]?.fin.timeSec ?? 0);
+      duration > 0 ? duration : (workScenes[workScenes.length - 1]?.fin.timeSec ?? 0);
     const fullScript = buildCloneFullScript(
-      scenes.map((s) => ({
+      workScenes.map((s) => ({
         sceneNumber: s.sceneNumber,
         debut: s.debut,
         fin: s.fin,
@@ -626,60 +820,77 @@ export default function CloneVideoWorkspace({
       refDuration
     );
 
-    const next = [...scenes];
-    for (let i = 0; i < next.length; i++) {
-      const s = next[i];
-      if (!s.analysis?.trim()) continue;
-      next[i] = { ...s, promptStatus: "loading", error: undefined };
-      setScenes([...next]);
-      setGenerateProgress(`Scene ${s.sceneNumber} / ${next.length} — VEO JSON...`);
-      try {
-        const data = await postAiJson(
-          "/api/ai/veo-scene-package",
-          {
-            fullScript,
-            sceneNumber: s.sceneNumber,
-            imageAnalysis: s.analysis,
-            languageLabel: "Moroccan Darija",
-            workflowMode: "clone",
-          },
-          180_000,
-          `Clone Veo package — Scene ${s.sceneNumber}`
-        );
+    const next = workScenes.map((s) =>
+      s.analysis?.trim()
+        ? { ...s, promptStatus: "loading" as const, error: undefined }
+        : s
+    );
+    const pendingCount = next.filter((s) => s.promptStatus === "loading").length;
+    setScenes([...next]);
+    setGenerateProgress(
+      pendingCount > 0
+        ? `Generating ${pendingCount} scene(s) (${CLONE_AI_CONCURRENCY} at a time)…`
+        : null
+    );
 
-        if (data.scenePackage != null) {
-          const pkg = data.scenePackage as Record<string, unknown>;
+    let done = 0;
+    const promptTasks = workScenes
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => s.analysis?.trim())
+      .map(({ s, i }) => async () => {
+        try {
+          const data = await postAiJson(
+            "/api/ai/veo-scene-package",
+            {
+              fullScript,
+              sceneNumber: s.sceneNumber,
+              imageAnalysis: s.analysis,
+              languageLabel: "Moroccan Darija",
+              workflowMode: "clone",
+            },
+            180_000,
+            `Clone Veo package — Scene ${s.sceneNumber}`
+          );
+
+          if (data.scenePackage != null) {
+            const pkg = data.scenePackage as Record<string, unknown>;
+            next[i] = {
+              ...next[i],
+              scenePackage: pkg,
+              veoPrompt: typeof pkg.veoPrompt === "string" ? pkg.veoPrompt : "",
+              negativePrompt:
+                typeof pkg.negativePrompt === "string" ? pkg.negativePrompt : "",
+              usagePrompt: isAiUsagePayload(data.usage) ? data.usage : undefined,
+              promptStatus: "done",
+            };
+          } else {
+            next[i] = {
+              ...next[i],
+              scenePackage: undefined,
+              veoPrompt: "",
+              negativePrompt: "",
+              parseError:
+                typeof data.parseError === "string" ? data.parseError : "JSON parse failed",
+              rawPackageText:
+                typeof data.rawPackageText === "string" ? data.rawPackageText : "",
+              promptStatus: "error",
+            };
+          }
+        } catch (e) {
           next[i] = {
             ...next[i],
-            scenePackage: pkg,
-            veoPrompt: typeof pkg.veoPrompt === "string" ? pkg.veoPrompt : "",
-            negativePrompt:
-              typeof pkg.negativePrompt === "string" ? pkg.negativePrompt : "",
-            usagePrompt: isAiUsagePayload(data.usage) ? data.usage : undefined,
-            promptStatus: "done",
-          };
-        } else {
-          next[i] = {
-            ...next[i],
-            scenePackage: undefined,
-            veoPrompt: "",
-            negativePrompt: "",
-            parseError:
-              typeof data.parseError === "string" ? data.parseError : "JSON parse failed",
-            rawPackageText:
-              typeof data.rawPackageText === "string" ? data.rawPackageText : "",
             promptStatus: "error",
+            error: e instanceof Error ? e.message : "Prompt failed",
           };
+        } finally {
+          done += 1;
+          setGenerateProgress(`Prompts ${done} / ${pendingCount} done…`);
+          setScenes([...next]);
         }
-      } catch (e) {
-        next[i] = {
-          ...next[i],
-          promptStatus: "error",
-          error: e instanceof Error ? e.message : "Prompt failed",
-        };
-      }
-      setScenes([...next]);
-    }
+      });
+
+    await runWithConcurrency(promptTasks, CLONE_AI_CONCURRENCY);
+
     setIsGenerating(false);
     setGenerateProgress(null);
     void persistProject({ step: 4, scenesOverride: next });
@@ -767,6 +978,17 @@ export default function CloneVideoWorkspace({
         </div>
       </header>
 
+      <ClonePipelineBoard
+        videoName={videoFile?.name ?? resumedSourceName}
+        framesCount={frames.length}
+        scenes={scenes}
+        step={step}
+        isExtracting={isExtracting}
+        isAnalyzing={isAnalyzing}
+        isGenerating={isGenerating}
+        autoPipeline={autoPipeline}
+      />
+
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
         {needsVideoResync && projectId ? (
           <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl text-sm text-amber-900 space-y-3">
@@ -849,7 +1071,7 @@ export default function CloneVideoWorkspace({
         {step === 1 && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
-              <h2 className="text-lg font-semibold">1 — Upload & split frames</h2>
+              <h2 className="text-lg font-semibold">1 — Upload video & settings</h2>
               <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-gray-200 rounded-2xl p-8 cursor-pointer hover:bg-gray-50 transition-colors">
                 <input
                   type="file"
@@ -931,6 +1153,76 @@ export default function CloneVideoWorkspace({
                 </div>
               </div>
 
+              <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-gray-800">Google Flow settings</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="text-xs">
+                    <span className="font-semibold text-gray-500 uppercase">Aspect</span>
+                    <select
+                      className="mt-1 w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                      value={flowSettings.aspectRatio}
+                      onChange={(e) => setFlowSettings(saveFlowSettings({ aspectRatio: e.target.value }))}
+                    >
+                      <option value="9:16">9:16 (vertical)</option>
+                      <option value="16:9">16:9</option>
+                      <option value="1:1">1:1</option>
+                    </select>
+                  </label>
+                  <label className="text-xs">
+                    <span className="font-semibold text-gray-500 uppercase">Duration</span>
+                    <select
+                      className="mt-1 w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                      value={flowSettings.duration}
+                      onChange={(e) => setFlowSettings(saveFlowSettings({ duration: e.target.value }))}
+                    >
+                      <option value="5">5s</option>
+                      <option value="8">8s</option>
+                      <option value="10">10s</option>
+                    </select>
+                  </label>
+                  <label className="text-xs">
+                    <span className="font-semibold text-gray-500 uppercase">Model</span>
+                    <input
+                      className="mt-1 w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                      value={flowSettings.model}
+                      onChange={(e) => setFlowSettings(saveFlowSettings({ model: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs">
+                    <span className="font-semibold text-gray-500 uppercase">Outputs</span>
+                    <select
+                      className="mt-1 w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm"
+                      value={flowSettings.outputs}
+                      onChange={(e) => setFlowSettings(saveFlowSettings({ outputs: e.target.value }))}
+                    >
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="4">4</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <label className="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={autoPipeline}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setAutoPipeline(on);
+                    try {
+                      localStorage.setItem("vf_auto_pipeline", on ? "true" : "false");
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                />
+                <span>
+                  Auto-run full pipeline — extract → analyze → Veo prompts (wait until ready)
+                </span>
+              </label>
+
               <button
                 type="button"
                 disabled={!videoFile || isExtracting}
@@ -938,7 +1230,7 @@ export default function CloneVideoWorkspace({
                 className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {isExtracting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                Extract frames
+                Start pipeline
               </button>
               {duration > 0 ? (
                 <p className="text-xs text-gray-500 text-center">Duration: {duration.toFixed(2)}s</p>
@@ -1143,6 +1435,7 @@ export default function CloneVideoWorkspace({
                 Nafs rich package dial Video Flow: full script + SCENE METADATA + clone mode (400–700+ mots
                 veoPrompt).
               </p>
+              <FlowExtensionBar scenes={flowExportScenes} disabled={isGenerating} />
             </div>
             {scenes.map((s) => {
               const displayPkg: Record<string, unknown> = {
@@ -1168,6 +1461,20 @@ export default function CloneVideoWorkspace({
                     <Download className="w-4 h-4" />
                     ZIP debut + fin
                   </button>
+                    <FlowExtensionSceneButton
+                      scene={toFlowSceneExport(
+                        s.sceneNumber,
+                        sceneImageSrc(s.debut.dataUrl, s.debutUrl),
+                        sceneImageSrc(s.fin.dataUrl, s.finUrl),
+                        {
+                          scenePackage: s.scenePackage,
+                          analysis: s.analysis,
+                          veoPrompt: s.veoPrompt,
+                          negativePrompt: s.negativePrompt,
+                        }
+                      )}
+                      disabled={!hasVeo31}
+                    />
                   </div>
                 </div>
                 <div className="flex gap-4">

@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Video Flow Workspace",
+  "version": "2.7.4",
+  "description": "Sidebar workspace: Clone Video + Google Flow fill — connected to Video Flow web app.",
+  "permissions": ["storage", "tabs", "scripting", "cookies", "sidePanel", "clipboardWrite"],
+  "host_permissions": [
+    "https://labs.google/*",
+    "https://*.google.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Video Flow sidebar"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://*.vercel.app/*"
+      ],
+      "js": ["content-app.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://labs.google/*"],
+      "js": ["flow-dom.js", "flow-edit-picker.js", "content-flow.js"],
+      "css": ["flow-edit-picker.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["flow-edit-picker.css"],
+      "matches": ["https://labs.google/*"]
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "http://127.0.0.1/*",
+      "https://*.vercel.app/*"
+    ]
+  }
+}

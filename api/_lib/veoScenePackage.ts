@@ -1,5 +1,6 @@
 import type { AiUsagePayload } from "./aiUsage.js";
 import { parseOpenAiUsage } from "./aiUsage.js";
+import { fetchOpenAiChat } from "./openaiRetry.js";
 
 export type VeoScenePackageRequestBody = {
   fullScript?: string;
@@ -65,16 +66,8 @@ async function openaiChat(
   if (opts?.max_tokens != null) {
     payload.max_tokens = opts.max_tokens;
   }
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const text = await r.text();
-  if (!r.ok) {
+  const { ok, status, text } = await fetchOpenAiChat(apiKey, payload);
+  if (!ok) {
     let msg = text.slice(0, 800);
     try {
       const j = JSON.parse(text) as { error?: { message?: string } };
@@ -82,8 +75,8 @@ async function openaiChat(
     } catch {
       /* ignore */
     }
-    const err = new Error(`OpenAI ${r.status}: ${msg}`) as Error & { httpStatus?: number };
-    err.httpStatus = r.status;
+    const err = new Error(`OpenAI ${status}: ${msg}`) as Error & { httpStatus?: number };
+    err.httpStatus = status;
     throw err;
   }
   let j: {

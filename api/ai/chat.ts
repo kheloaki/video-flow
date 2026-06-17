@@ -3,6 +3,7 @@
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { parseOpenAiUsage, type AiUsagePayload } from "../_lib/aiUsage.js";
+import { fetchOpenAiChat } from "../_lib/openaiRetry.js";
 
 export const config = {
   api: {
@@ -25,20 +26,12 @@ async function runOpenAIChat(
   modelEnv: string | undefined
 ): Promise<{ text: string; usage: AiUsagePayload | null }> {
   const model = modelEnv?.trim() || "gpt-4o-mini";
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: typeof temperature === "number" ? temperature : 0.7,
-    }),
+  const { ok, status, text } = await fetchOpenAiChat(apiKey, {
+    model,
+    messages,
+    temperature: typeof temperature === "number" ? temperature : 0.7,
   });
-  const text = await r.text();
-  if (!r.ok) {
+  if (!ok) {
     let msg = text.slice(0, 600);
     try {
       const j = JSON.parse(text) as { error?: { message?: string } };
@@ -47,7 +40,7 @@ async function runOpenAIChat(
       /* ignore */
     }
     const err = new Error(msg) as Error & { httpStatus?: number };
-    err.httpStatus = r.status;
+    err.httpStatus = status;
     throw err;
   }
   const j = JSON.parse(text) as {

@@ -4,6 +4,7 @@
  */
 import { GoogleGenAI } from "@google/genai";
 import { buildGeminiUsage, parseOpenAiUsage, type AiUsagePayload } from "./api/_lib/aiUsage.js";
+import { fetchOpenAiChat } from "./api/_lib/openaiRetry.js";
 
 export const GEMINI_INLINE_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -48,20 +49,12 @@ export async function runOpenAIChat(
 ): Promise<{ text: string; usage: AiUsagePayload | null }> {
   const model = options.model?.trim() || "gpt-4o-mini";
   const operation = options.operation ?? "chat";
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${options.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: typeof temperature === "number" ? temperature : 0.7,
-    }),
+  const { ok, status, text } = await fetchOpenAiChat(options.apiKey, {
+    model,
+    messages,
+    temperature: typeof temperature === "number" ? temperature : 0.7,
   });
-  const text = await r.text();
-  if (!r.ok) {
+  if (!ok) {
     let msg = text.slice(0, 600);
     try {
       const j = JSON.parse(text) as { error?: { message?: string } };
@@ -70,7 +63,7 @@ export async function runOpenAIChat(
       /* ignore */
     }
     const err = new Error(msg) as Error & { httpStatus?: number };
-    err.httpStatus = r.status;
+    err.httpStatus = status;
     throw err;
   }
   const j = JSON.parse(text) as {

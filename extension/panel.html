@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video Flow Workspace</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body class="sidebar-mode">
+    <header class="topbar compact">
+      <div class="topbar-main">
+        <div class="brand">
+          <span class="logo">VF</span>
+          <div>
+            <h1>Video Flow</h1>
+            <p class="subtitle">Clone · Analyze · Google Flow</p>
+          </div>
+        </div>
+        <button type="button" id="btnOpenFlow" class="btn ghost sm">Google Flow</button>
+      </div>
+      <div class="topbar-badges">
+        <span id="usageBadge" class="usage-badge hidden"></span>
+        <span id="dbBadge" class="db-badge">…</span>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab active" data-tab="clone">Clone Video</button>
+      <button type="button" class="tab" data-tab="queue">Web app queue</button>
+      <button type="button" class="tab" data-tab="editing">Editing</button>
+      <button type="button" class="tab" data-tab="settings">Settings</button>
+      <button type="button" class="tab hidden" data-tab="admin" id="tabAdminBtn">Admin</button>
+    </nav>
+
+    <div id="statusBar" class="status-bar hidden"></div>
+
+    <div class="panel-scroll">
+    <main id="tab-clone" class="tab-panel active">
+      <section id="pipelineBoard" class="pipeline-board card hidden"></section>
+      <nav class="steps" id="stepNav"></nav>
+
+      <section id="clone-step-1" class="card">
+        <h2>1 — Upload video & settings</h2>
+        <label class="upload-zone">
+          <input type="file" id="videoInput" accept="video/*" hidden />
+          <span class="upload-icon">🎬</span>
+          <span id="videoLabel">Drop video here or click to upload</span>
+        </label>
+        <video id="videoPreview" controls class="video-preview hidden"></video>
+        <div class="grid-2">
+          <label>
+            <span class="label">Split mode</span>
+            <select id="extractMode">
+              <option value="count">Frame count</option>
+              <option value="interval">Interval (seconds)</option>
+            </select>
+          </label>
+          <label>
+            <span class="label">Frame count</span>
+            <input type="number" id="frameCount" min="2" max="120" value="24" />
+          </label>
+          <label>
+            <span class="label">Interval (sec)</span>
+            <input type="number" id="intervalSec" min="0.25" step="0.25" value="1" />
+          </label>
+          <label>
+            <span class="label">Target scenes (2–40)</span>
+            <input type="number" id="sceneCount" min="2" max="40" value="6" />
+          </label>
+        </div>
+        <div id="flowSettingsSummary" class="flow-settings-summary"></div>
+        <label class="check-row">
+          <input type="checkbox" id="autoPipeline" checked />
+          <span>Auto-run full pipeline — extract → analyze → Veo prompts (wait until ready)</span>
+        </label>
+        <button type="button" id="btnExtract" class="btn primary full">Start pipeline</button>
+        <p class="hint center">Upload video, confirm settings above, then start. You can close the sidebar while analyze runs.</p>
+      </section>
+
+      <section id="clone-step-2" class="card hidden">
+        <h2>2 — Scene boundaries</h2>
+        <p class="hint">Click frames to add/remove boundaries. Each segment = one scene (debut → fin).</p>
+        <div class="row">
+          <button type="button" id="btnAutoBoundaries" class="btn secondary">Auto boundaries</button>
+          <span id="boundarySummary" class="muted"></span>
+        </div>
+        <div id="frameStrip" class="frame-strip"></div>
+        <ul id="scenePairList" class="scene-pair-list"></ul>
+        <button type="button" id="btnConfirmScenes" class="btn primary full">Confirm scenes → Analyze</button>
+      </section>
+
+      <section id="clone-step-3" class="card hidden">
+        <h2>3 — Analyze (debut → fin)</h2>
+        <button type="button" id="btnAnalyzeAll" class="btn primary full">Analyze all scenes</button>
+        <p class="muted center">Runs in background — safe to close sidebar while analyzing.</p>
+        <div id="analyzeScenes" class="scene-cards"></div>
+      </section>
+
+      <section id="clone-step-4" class="card hidden">
+        <h2>4 — Veo prompts & Google Flow</h2>
+        <button type="button" id="btnGeneratePrompts" class="btn primary full">Generate Veo prompts</button>
+        <p id="generateProgress" class="muted center hidden"></p>
+        <button type="button" id="btnQueueAllFlow" class="btn secondary full">Queue all for Google Flow</button>
+        <div id="promptScenes" class="scene-cards large"></div>
+      </section>
+    </main>
+
+    <!-- ========== QUEUE TAB ========== -->
+    <main id="tab-queue" class="tab-panel hidden">
+      <section class="card">
+        <h2>Scenes from web app</h2>
+        <p class="hint">Check multiple scenes, then run once — they fill automatically one after another in Google Flow.</p>
+        <div id="queueDoneBanner" class="queue-done-banner hidden" role="status"></div>
+        <div class="row queue-toolbar">
+          <button type="button" id="btnFillSelected" class="btn primary">Run selected scenes</button>
+          <button type="button" id="btnStopQueueBatch" class="btn ghost hidden">Stop</button>
+          <button type="button" id="btnQueueSelectAll" class="btn ghost sm">Select all</button>
+          <button type="button" id="btnQueueSelectNone" class="btn ghost sm">Clear selection</button>
+          <button type="button" id="btnClearQueue" class="btn ghost">Clear queue</button>
+        </div>
+        <p id="queueCount" class="muted">Queue: 0</p>
+        <div id="queueList" class="queue-list"></div>
+      </section>
+    </main>
+
+    <!-- ========== EDITING TAB ========== -->
+    <main id="tab-editing" class="tab-panel hidden">
+      <section class="card">
+        <h2>Editing — combine clips</h2>
+        <p class="hint">
+          On <strong>Google Flow</strong>, check videos in combine order (1st = #1, 2nd = #2).
+          After <strong>Send to Editing</strong>, press <strong>▶</strong> on each clip to verify playback before combining.
+        </p>
+        <div class="row edit-toolbar">
+          <button type="button" id="btnEditRefreshFromFlow" class="btn secondary sm">Refresh from Flow</button>
+          <button type="button" id="btnEditShowPicker" class="btn secondary sm">Show picker on Flow</button>
+          <button type="button" id="btnEditSelectAll" class="btn ghost sm">Select all</button>
+          <button type="button" id="btnEditSelectNone" class="btn ghost sm">Clear selection</button>
+          <button type="button" id="btnEditClearClips" class="btn ghost sm">Remove all</button>
+        </div>
+        <label class="upload-zone edit-upload-fallback">
+          <input type="file" id="editVideoInput" accept="video/*" multiple hidden />
+          <span class="upload-icon">🎞</span>
+          <span id="editUploadLabel">Or upload videos manually</span>
+        </label>
+        <p id="editSummary" class="muted">0 clips</p>
+        <div id="editTimeline" class="edit-timeline muted">Timeline order will appear here.</div>
+        <div id="editClipList" class="edit-clip-list"></div>
+        <button type="button" id="btnCombineClips" class="btn primary full" disabled>
+          Combine selected clips
+        </button>
+        <p id="editProgress" class="muted center hidden"></p>
+      </section>
+    </main>
+
+    <!-- ========== SETTINGS TAB ========== -->
+    <main id="tab-settings" class="tab-panel hidden">
+      <section class="card">
+        <h2>Database (Supabase)</h2>
+        <p id="authStatus" class="hint">Login: checking…</p>
+        <button type="button" id="btnSyncAuth" class="btn secondary sm">Sync login from web app tab</button>
+        <label class="mt">
+          <span class="label">Supabase URL</span>
+          <input type="url" id="supabaseUrl" placeholder="https://xxx.supabase.co" />
+        </label>
+        <label>
+          <span class="label">Supabase anon key</span>
+          <input type="password" id="supabaseAnonKey" placeholder="eyJ..." />
+        </label>
+        <p id="saveStatus" class="muted"></p>
+        <div id="savedProjects" class="saved-projects"></div>
+      </section>
+
+      <section class="card">
+        <h2>API (analyze / Veo)</h2>
+        <label>
+          <span class="label">App base URL</span>
+          <input type="url" id="appBaseUrl" placeholder="http://localhost:3000" />
+        </label>
+        <div class="row">
+          <button type="button" id="btnSaveSettings" class="btn primary sm">Save all</button>
+          <button type="button" id="btnTestApi" class="btn secondary sm">Test API</button>
+        </div>
+        <p id="settingsStatus" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <h2>Google Flow automation</h2>
+        <label class="check-row">
+          <input type="checkbox" id="flowAutoRun" checked />
+          <span>Auto-run Generate after fill</span>
+        </label>
+        <div class="grid-2">
+          <label>
+            <span class="label">Aspect ratio</span>
+            <select id="flowAspect">
+              <option value="9:16" selected>9:16 (vertical)</option>
+              <option value="16:9">16:9</option>
+              <option value="1:1">1:1</option>
+            </select>
+          </label>
+          <label>
+            <span class="label">Model (text match)</span>
+            <input type="text" id="flowModel" value="Veo 3.1" />
+          </label>
+          <label>
+            <span class="label">Duration (sec)</span>
+            <select id="flowDuration">
+              <option value="5">5s</option>
+              <option value="8" selected>8s</option>
+              <option value="10">10s</option>
+            </select>
+          </label>
+          <label>
+            <span class="label">Outputs</span>
+            <select id="flowOutputs">
+              <option value="1" selected>1</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span class="label">Video mode label</span>
+          <input type="text" id="flowVideoMode" value="Frames to Video" />
+        </label>
+      </section>
+    </main>
+
+    <main id="tab-admin" class="tab-panel hidden">
+      <section class="card">
+        <h2>Admin — all users usage</h2>
+        <p class="hint">This month · requires <code>is_admin</code> on your Supabase profile.</p>
+        <div id="adminStats" class="admin-stats"></div>
+        <div id="adminUsers" class="admin-table-wrap"></div>
+        <h3 class="mt">Recent API calls</h3>
+        <div id="adminRecent" class="admin-recent"></div>
+      </section>
+    </main>
+    </div>
+
+    <div id="editPreviewModal" class="edit-preview-modal hidden" role="dialog" aria-label="Clip preview">
+      <div class="edit-preview-card">
+        <div class="edit-preview-head">
+          <strong id="editPreviewTitle">Preview</strong>
+          <button type="button" id="editPreviewClose" class="btn ghost sm">Close</button>
+        </div>
+        <video id="editPreviewVideo" class="edit-preview-video" controls playsinline preload="auto"></video>
+      </div>
+    </div>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
