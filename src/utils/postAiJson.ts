@@ -1,17 +1,22 @@
 import { apiUrl } from "../apiBase";
 import { recordAiUsageFromResponse } from "./aiUsage";
+import { getApiAuthHeader } from "./apiAuth";
 
 async function fetchWithTimeout(
   url: string,
   body: unknown,
-  timeoutMs: number
+  timeoutMs: number,
+  extraHeaders?: Record<string, string>
 ): Promise<Response> {
   const controller = new AbortController();
   const id = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...extraHeaders,
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -27,7 +32,8 @@ export async function postAiJson(
   timeoutMs: number,
   label?: string
 ): Promise<Record<string, unknown>> {
-  const res = await fetchWithTimeout(apiUrl(path), body, timeoutMs);
+  const authHeaders = await getApiAuthHeader();
+  const res = await fetchWithTimeout(apiUrl(path), body, timeoutMs, authHeaders);
   const rawText = await res.text();
   const ct = res.headers.get("content-type") ?? "";
   let data: Record<string, unknown> = {};

@@ -1,13 +1,13 @@
-import { getSupabaseConfig, getSession } from "./auth.js";
+import { getSupabaseConfig, getValidSession } from "./auth.js";
 
 async function rest(path, options = {}) {
   const config = await getSupabaseConfig();
-  const session = await getSession();
+  const session = await getValidSession();
   if (!config.url || !config.anonKey) {
-    throw new Error("Supabase URL w anon key khasshom f Settings.");
+    throw new Error("Supabase not configured.");
   }
   if (!session?.accessToken) {
-    throw new Error("Ma-loginitich — log in f Video Flow website lwl.");
+    throw new Error("Sign in from Settings (email/password) or sync from the web app.");
   }
   const url = `${config.url}/rest/v1${path}`;
   const headers = {
@@ -65,7 +65,7 @@ function sumSceneUsage(scenes) {
 }
 
 export async function listCloneProjects() {
-  const session = await getSession();
+  const session = await getValidSession();
   const rows = await rest(
     `/clone_projects?owner_id=eq.${session.userId}&order=updated_at.desc&limit=30`,
     { method: "GET" }
@@ -74,7 +74,7 @@ export async function listCloneProjects() {
 }
 
 export async function fetchCloneProject(projectId) {
-  const session = await getSession();
+  const session = await getValidSession();
   const rows = await rest(
     `/clone_projects?id=eq.${projectId}&owner_id=eq.${session.userId}&limit=1`,
     { method: "GET" }
@@ -83,7 +83,7 @@ export async function fetchCloneProject(projectId) {
 }
 
 export async function createCloneProject(payload) {
-  const session = await getSession();
+  const session = await getValidSession();
   const body = {
     owner_id: session.userId,
     name: payload.name,
@@ -104,7 +104,7 @@ export async function createCloneProject(payload) {
 }
 
 export async function updateCloneProject(projectId, payload) {
-  const session = await getSession();
+  const session = await getValidSession();
   const patch = { updated_at: new Date().toISOString() };
   if (payload.name != null) patch.name = payload.name;
   if (payload.durationSec != null) patch.duration_sec = payload.durationSec;

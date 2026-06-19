@@ -9,6 +9,7 @@ build/
 .env
 .env.*
 !.env.example
+extension/lib/supabase-defaults.js
 *.pem
 *.key
 

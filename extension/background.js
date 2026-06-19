@@ -343,14 +343,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             savedAt: Date.now(),
           },
         });
-        if (p.supabaseUrl) {
+        if (p.supabaseUrl || p.supabaseAnonKey) {
           const existing = await chrome.storage.sync.get("vf_supabase_config");
           const cfg = existing.vf_supabase_config ?? {};
-          if (!cfg.url) {
-            await chrome.storage.sync.set({
-              vf_supabase_config: { ...cfg, url: p.supabaseUrl },
-            });
-          }
+          await chrome.storage.sync.set({
+            vf_supabase_config: {
+              ...cfg,
+              ...(p.supabaseUrl ? { url: p.supabaseUrl } : {}),
+              ...(p.supabaseAnonKey ? { anonKey: p.supabaseAnonKey } : {}),
+            },
+          });
         }
         sendResponse({ ok: true });
         return;

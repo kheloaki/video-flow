@@ -127,9 +127,9 @@ export function ProductHub({
               <div className="bg-slate-800 w-14 h-14 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-105 transition-transform">
                 <Shield className="w-7 h-7 text-white" />
               </div>
-              <h2 className="text-xl font-bold mb-2">Admin — all users usage</h2>
+              <h2 className="text-xl font-bold mb-2">Admin — users & limits</h2>
               <p className="text-sm text-gray-600 leading-relaxed">
-                Chof kolchi: API calls, tokens, cost per user w recent activity dial kol l-accounts.
+                Chof kol l-users, usage dial l-youm w d-chhr, w 7dd caps: daily $, daily tokens, monthly $.
               </p>
               <span className="inline-block mt-5 text-sm font-semibold text-slate-700">Fte7 →</span>
             </button>

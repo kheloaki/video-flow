@@ -1,5 +1,7 @@
 const DEFAULT_BASE = "http://localhost:3000";
 
+import { getValidSession } from "./auth.js";
+
 export async function getApiBase() {
   const data = await chrome.storage.sync.get("appBaseUrl");
   const base = (data.appBaseUrl || DEFAULT_BASE).trim().replace(/\/$/, "");
@@ -13,12 +15,17 @@ export async function setApiBase(url) {
 export async function postAiJson(path, body, timeoutMs = 180_000, baseOverride) {
   const base = (baseOverride || (await getApiBase())).replace(/\/$/, "");
   const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  const session = await getValidSession();
+  const headers = { "Content-Type": "application/json" };
+  if (session?.accessToken) {
+    headers.Authorization = `Bearer ${session.accessToken}`;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });

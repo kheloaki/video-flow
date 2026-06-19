@@ -1249,10 +1249,15 @@ async function fetchVeoScenePackageWithTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const id = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
   try {
     return await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -2791,9 +2796,14 @@ export default function App() {
   }, [user, webhookUrl, imagesWebhookUrl]);
 
   const callAiChat = async (prompt: string, temperature: number, label = "Chat") => {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
     const chatRes = await fetch(apiUrl("/api/ai/chat"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         messages: [{ role: "user", content: prompt }],
         temperature,

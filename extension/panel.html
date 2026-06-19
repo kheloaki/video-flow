@@ -155,20 +155,43 @@
 
     <!-- ========== SETTINGS TAB ========== -->
     <main id="tab-settings" class="tab-panel hidden">
-      <section class="card">
-        <h2>Database (Supabase)</h2>
-        <p id="authStatus" class="hint">Login: checking…</p>
-        <button type="button" id="btnSyncAuth" class="btn secondary sm">Sync login from web app tab</button>
-        <label class="mt">
-          <span class="label">Supabase URL</span>
-          <input type="url" id="supabaseUrl" placeholder="https://xxx.supabase.co" />
-        </label>
-        <label>
-          <span class="label">Supabase anon key</span>
-          <input type="password" id="supabaseAnonKey" placeholder="eyJ..." />
-        </label>
-        <p id="saveStatus" class="muted"></p>
+      <section class="card" id="authCard">
+        <h2>Account</h2>
+        <p id="authStatus" class="hint">Checking login…</p>
+
+        <div id="authLoggedOut">
+          <label>
+            <span class="label">Email</span>
+            <input type="email" id="authEmail" autocomplete="username" placeholder="you@example.com" />
+          </label>
+          <label>
+            <span class="label">Password</span>
+            <input type="password" id="authPassword" autocomplete="current-password" placeholder="••••••••" />
+          </label>
+          <button type="button" id="btnSignIn" class="btn primary full">Sign in</button>
+          <p id="authError" class="auth-error hidden"></p>
+          <p class="hint center">Already signed in on the website?</p>
+          <button type="button" id="btnSyncAuth" class="btn secondary sm full">Sync from web app tab</button>
+        </div>
+
+        <div id="authLoggedIn" class="hidden">
+          <button type="button" id="btnSignOut" class="btn ghost sm">Sign out</button>
+        </div>
+
         <div id="savedProjects" class="saved-projects"></div>
+
+        <details class="advanced-settings mt">
+          <summary>Advanced — custom Supabase</summary>
+          <label>
+            <span class="label">Supabase URL</span>
+            <input type="url" id="supabaseUrl" placeholder="https://xxx.supabase.co" />
+          </label>
+          <label>
+            <span class="label">Supabase anon key</span>
+            <input type="password" id="supabaseAnonKey" placeholder="eyJ..." />
+          </label>
+          <p class="hint">Leave blank to use the built-in Video Flow project.</p>
+        </details>
       </section>
 
       <section class="card">
@@ -229,8 +252,8 @@
 
     <main id="tab-admin" class="tab-panel hidden">
       <section class="card">
-        <h2>Admin — all users usage</h2>
-        <p class="hint">This month · requires <code>is_admin</code> on your Supabase profile.</p>
+        <h2>Admin — users & limits</h2>
+        <p class="hint">All accounts · set daily $ / tokens / monthly $ per user.</p>
         <div id="adminStats" class="admin-stats"></div>
         <div id="adminUsers" class="admin-table-wrap"></div>
         <h3 class="mt">Recent API calls</h3>

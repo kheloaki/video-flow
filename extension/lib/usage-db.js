@@ -1,4 +1,4 @@
-import { getSupabaseConfig, getSession } from "./auth.js";
+import { getSupabaseConfig, getValidSession } from "./auth.js";
 
 export function isAiUsagePayload(v) {
   if (!v || typeof v !== "object") return false;
@@ -22,7 +22,7 @@ export function formatUsageLine(u) {
 }
 
 export async function insertUsageLog(usage, label, opts = {}) {
-  const session = await getSession();
+  const session = await getValidSession();
   const config = await getSupabaseConfig();
   if (!session?.accessToken || !config.url || !config.anonKey) return;
 
@@ -62,7 +62,7 @@ function monthStartIso() {
 }
 
 export async function fetchUsageBalance() {
-  const session = await getSession();
+  const session = await getValidSession();
   const config = await getSupabaseConfig();
   if (!session?.accessToken || !config.url || !config.anonKey) {
     return null;

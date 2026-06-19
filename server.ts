@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
 import { runVeoSceneAnalyze, runVeoScenePackage } from "./api/_lib/veoScenePackage.js";
+import { checkAiUsageBudget } from "./api/_lib/usageBudget.js";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -182,6 +183,10 @@ async function startServer() {
     upload.single("file"),
     wrapAsync(async (req, res) => {
       try {
+        const budget = await checkAiUsageBudget(req);
+        if (budget.allowed === false) {
+          return sendJson(res, budget.status, { error: budget.error });
+        }
         if (!req.file?.buffer) {
           return sendJson(res, 400, { error: "Missing file" });
         }
@@ -219,6 +224,10 @@ async function startServer() {
     express.json({ limit: "4mb" }),
     wrapAsync(async (req, res) => {
       try {
+        const budget = await checkAiUsageBudget(req);
+        if (budget.allowed === false) {
+          return sendJson(res, budget.status, { error: budget.error });
+        }
         const { messages, temperature } = req.body as {
           messages?: unknown;
           temperature?: unknown;
@@ -262,6 +271,10 @@ async function startServer() {
     express.json({ limit: "12mb" }),
     wrapAsync(async (req, res) => {
       try {
+        const budget = await checkAiUsageBudget(req);
+        if (budget.allowed === false) {
+          return sendJson(res, budget.status, { error: budget.error });
+        }
         const apiKey = process.env.OPENAI_API_KEY?.trim();
         if (!apiKey) {
           return sendJson(res, 500, {
@@ -288,6 +301,10 @@ async function startServer() {
     express.json({ limit: "12mb" }),
     wrapAsync(async (req, res) => {
       try {
+        const budget = await checkAiUsageBudget(req);
+        if (budget.allowed === false) {
+          return sendJson(res, budget.status, { error: budget.error });
+        }
         const apiKey = process.env.OPENAI_API_KEY?.trim();
         if (!apiKey) {
           return sendJson(res, 500, {

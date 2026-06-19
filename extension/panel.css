@@ -394,6 +394,37 @@ h1 {
   margin: 0 0 14px;
 }
 
+.auth-error {
+  color: var(--red);
+  font-size: 13px;
+  margin: 8px 0 12px;
+}
+
+.advanced-settings {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.advanced-settings summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.advanced-settings[open] summary {
+  margin-bottom: 14px;
+}
+
+#authLoggedOut label + label {
+  margin-top: 10px;
+}
+
+#authLoggedOut .btn.primary {
+  margin-top: 12px;
+}
+
 .center {
   text-align: center;
 }
@@ -1138,4 +1169,35 @@ textarea {
   font-weight: 700;
   color: #6ee7b7;
   white-space: nowrap;
+}
+
+.admin-table-limits .limit-input {
+  width: 4.5rem;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.admin-table tr.over-limit td {
+  background: rgba(251, 113, 133, 0.08);
+}
+
+.admin-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(139, 92, 246, 0.2);
+  color: #c4b5fd;
+}
+
+.muted.xs {
+  font-size: 10px;
+  margin-top: 2px;
 }

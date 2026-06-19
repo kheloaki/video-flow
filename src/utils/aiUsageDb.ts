@@ -24,6 +24,10 @@ export type UsageBalanceSummary = {
   allTime: { totalTokens: number; totalCostUsd: number; callCount: number };
   monthlyBudgetUsd: number | null;
   budgetRemainingUsd: number | null;
+  dailyBudgetUsd: number | null;
+  dailyTokenLimit: number | null;
+  dailyBudgetRemainingUsd: number | null;
+  dailyTokensRemaining: number | null;
 };
 
 function dayKey(iso: string): string {
@@ -133,7 +137,7 @@ export async function fetchUsageBalance(ownerId: string): Promise<UsageBalanceSu
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  const [todayRows, monthRows, allRows, settingsRes] = await Promise.all([
+  const [todayRows, monthRows, allRows, profileRes] = await Promise.all([
     fetchUsageLogsSince(ownerId, todayStart.toISOString()),
     fetchUsageLogsSince(ownerId, monthStartIso()),
     supabase
@@ -141,9 +145,9 @@ export async function fetchUsageBalance(ownerId: string): Promise<UsageBalanceSu
       .select("total_tokens, cost_usd")
       .eq("owner_id", ownerId),
     supabase
-      .from("user_app_settings")
-      .select("ai_monthly_budget_usd")
-      .eq("owner_id", ownerId)
+      .from("profiles")
+      .select("ai_daily_budget_usd, ai_daily_token_limit, ai_monthly_budget_usd")
+      .eq("id", ownerId)
       .maybeSingle(),
   ]);
 
@@ -159,12 +163,31 @@ export async function fetchUsageBalance(ownerId: string): Promise<UsageBalanceSu
     callCount: allData.length,
   };
 
-  const budgetRaw = settingsRes.data?.ai_monthly_budget_usd;
+  const profile = profileRes.data;
   const monthlyBudgetUsd =
-    budgetRaw != null && Number.isFinite(Number(budgetRaw)) ? Number(budgetRaw) : null;
+    profile?.ai_monthly_budget_usd != null && Number.isFinite(Number(profile.ai_monthly_budget_usd))
+      ? Number(profile.ai_monthly_budget_usd)
+      : null;
+  const dailyBudgetUsd =
+    profile?.ai_daily_budget_usd != null && Number.isFinite(Number(profile.ai_daily_budget_usd))
+      ? Number(profile.ai_daily_budget_usd)
+      : null;
+  const dailyTokenLimit =
+    profile?.ai_daily_token_limit != null && Number.isFinite(Number(profile.ai_daily_token_limit))
+      ? Number(profile.ai_daily_token_limit)
+      : null;
+
   const budgetRemainingUsd =
     monthlyBudgetUsd != null
       ? Math.max(0, Math.round((monthlyBudgetUsd - monthAgg.totalCostUsd) * 1_000_000) / 1_000_000)
+      : null;
+  const dailyBudgetRemainingUsd =
+    dailyBudgetUsd != null
+      ? Math.max(0, Math.round((dailyBudgetUsd - todayAgg.totalCostUsd) * 1_000_000) / 1_000_000)
+      : null;
+  const dailyTokensRemaining =
+    dailyTokenLimit != null
+      ? Math.max(0, dailyTokenLimit - todayAgg.totalTokens)
       : null;
 
   return {
@@ -180,6 +203,10 @@ export async function fetchUsageBalance(ownerId: string): Promise<UsageBalanceSu
     allTime,
     monthlyBudgetUsd,
     budgetRemainingUsd,
+    dailyBudgetUsd,
+    dailyTokenLimit,
+    dailyBudgetRemainingUsd,
+    dailyTokensRemaining,
   };
 }
 

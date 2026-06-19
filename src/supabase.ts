@@ -10,3 +10,14 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 export const supabase = createClient(supabaseUrl ?? "", supabaseAnonKey ?? "");
+
+if (typeof window !== "undefined" && supabaseUrl && supabaseAnonKey) {
+  (
+    window as unknown as {
+      __VIDEO_FLOW_SUPABASE_CONFIG__?: { url: string; anonKey: string };
+    }
+  ).__VIDEO_FLOW_SUPABASE_CONFIG__ = {
+    url: supabaseUrl,
+    anonKey: supabaseAnonKey,
+  };
+}

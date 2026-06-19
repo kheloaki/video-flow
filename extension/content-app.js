@@ -49,6 +49,14 @@ function safeSendMessage(message, callback) {
   }
 }
 
+function readSupabaseConfigFromPage() {
+  const cfg = window.__VIDEO_FLOW_SUPABASE_CONFIG__;
+  if (cfg?.url && cfg?.anonKey) {
+    return { url: cfg.url, anonKey: cfg.anonKey };
+  }
+  return null;
+}
+
 function readSupabaseSessionFromPage() {
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
@@ -84,7 +92,14 @@ function pushSessionToExtension() {
   }
   const session = readSupabaseSessionFromPage();
   if (!session) return;
-  safeSendMessage({ type: "VF_AUTH_SESSION", payload: session });
+  const pageConfig = readSupabaseConfigFromPage();
+  safeSendMessage({
+    type: "VF_AUTH_SESSION",
+    payload: {
+      ...session,
+      supabaseAnonKey: pageConfig?.anonKey ?? null,
+    },
+  });
 }
 
 pushSessionToExtension();

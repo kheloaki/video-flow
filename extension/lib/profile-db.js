@@ -1,7 +1,7 @@
-import { getSupabaseConfig, getSession } from "./auth.js";
+import { getSupabaseConfig, getValidSession } from "./auth.js";
 
 export async function fetchUserProfile() {
-  const session = await getSession();
+  const session = await getValidSession();
   const config = await getSupabaseConfig();
   if (!session?.accessToken || !config.url || !config.anonKey) return null;
 

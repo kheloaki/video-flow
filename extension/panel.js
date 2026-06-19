@@ -14,8 +14,11 @@ import { loadEditClips, clearEditClips, saveEditClips } from "./lib/edit-clip-st
 import {
   getSession,
   isLoggedIn,
+  signIn,
+  signOut,
   setSupabaseConfig,
   getSupabaseConfig,
+  getSupabaseConfigOverrides,
 } from "./lib/auth.js";
 import {
   createCloneProject,
@@ -26,7 +29,7 @@ import {
 import { getFlowSettings, setFlowSettings } from "./lib/flow-settings.js";
 import { buildFlowPromptJson, buildFlowScenePayload } from "./lib/flow-prompt.js";
 import { fetchIsAdmin } from "./lib/profile-db.js";
-import { fetchAdminUsageOverview, formatCostUsd as adminFormatCost } from "./lib/admin-usage-db.js";
+import { fetchAdminUsageOverview, formatCostUsd as adminFormatCost, updateAdminUserLimits } from "./lib/admin-usage-db.js";
 import {
   isAiUsagePayload,
   insertUsageLog,
@@ -479,36 +482,54 @@ function updateDbBadge(mode) {
 
 async function refreshAuthUi() {
   const session = await getSession();
-  const el = $("#authStatus");
-  if (session?.email) {
-    el.textContent = `Logged in: ${session.email}`;
+  const loggedIn = !!(session?.accessToken && session?.userId);
+  const statusEl = $("#authStatus");
+  const outEl = $("#authLoggedOut");
+  const inEl = $("#authLoggedIn");
+  const errEl = $("#authError");
+
+  if (loggedIn && session?.email) {
+    statusEl.textContent = `Signed in as ${session.email}`;
+    outEl?.classList.add("hidden");
+    inEl?.classList.remove("hidden");
+  } else if (loggedIn) {
+    statusEl.textContent = "Signed in";
+    outEl?.classList.add("hidden");
+    inEl?.classList.remove("hidden");
   } else {
-    el.textContent = "Not logged in — open Video Flow & sign in, then Sync login.";
+    statusEl.textContent = "Sign in to save projects and track usage.";
+    outEl?.classList.remove("hidden");
+    inEl?.classList.add("hidden");
   }
+  errEl?.classList.add("hidden");
+
   await refreshUsageBadge();
-  state.isAdmin = (await isLoggedIn()) ? await fetchIsAdmin() : false;
+  state.isAdmin = loggedIn ? await fetchIsAdmin() : false;
   const adminTab = $("#tabAdminBtn");
   if (adminTab) adminTab.classList.toggle("hidden", !state.isAdmin);
-  if (await isLoggedIn()) {
-    try {
-      const projects = await listCloneProjects();
-      const box = $("#savedProjects");
-      if (!projects.length) {
-        box.innerHTML = "<p class='muted'>No DB projects yet.</p>";
-        return;
-      }
-      box.innerHTML = projects
-        .map(
-          (p) =>
-            `<button type="button" data-id="${p.id}">${escapeHtml(p.name)} · step ${p.step}</button>`
-        )
-        .join("");
-      box.querySelectorAll("button").forEach((btn) => {
-        btn.addEventListener("click", () => void loadProjectFromDb(btn.dataset.id));
-      });
-    } catch (e) {
-      $("#savedProjects").innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+  const projectsBox = $("#savedProjects");
+  if (!loggedIn) {
+    if (projectsBox) projectsBox.innerHTML = "";
+    return;
+  }
+  try {
+    const projects = await listCloneProjects();
+    const box = $("#savedProjects");
+    if (!projects.length) {
+      box.innerHTML = "<p class='muted'>No DB projects yet.</p>";
+      return;
     }
+    box.innerHTML = projects
+      .map(
+        (p) =>
+          `<button type="button" data-id="${p.id}">${escapeHtml(p.name)} · step ${p.step}</button>`
+      )
+      .join("");
+    box.querySelectorAll("button").forEach((btn) => {
+      btn.addEventListener("click", () => void loadProjectFromDb(btn.dataset.id));
+    });
+  } catch (e) {
+    $("#savedProjects").innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -675,33 +696,94 @@ async function renderAdminTab() {
     const data = await fetchAdminUsageOverview();
     stats.innerHTML = `
       <div class="admin-stat-grid">
-        <div><span class="muted">Users</span><strong>${data.totalUsers}</strong></div>
-        <div><span class="muted">Calls</span><strong>${data.totalCalls}</strong></div>
+        <div><span class="muted">All users</span><strong>${data.totalUsers}</strong></div>
+        <div><span class="muted">Calls (month)</span><strong>${data.totalCalls}</strong></div>
         <div><span class="muted">Tokens</span><strong>${data.totalTokens.toLocaleString()}</strong></div>
         <div><span class="muted">Cost</span><strong>${adminFormatCost(data.totalCostUsd)}</strong></div>
       </div>`;
+
     users.innerHTML = `
-      <table class="admin-table">
-        <thead><tr><th>Email</th><th>Calls</th><th>Tokens</th><th>Cost</th><th>Last</th></tr></thead>
+      <p class="hint">Empty cap = unlimited. If no users appear, run <code>supabase/admin_rls_fix.sql</code> in Supabase.</p>
+      ${data.users.length === 0 ? `<p class="muted center">No users — run admin_rls_fix.sql to sync Auth accounts.</p>` : `
+      <table class="admin-table admin-table-limits">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Today</th>
+            <th>Month</th>
+            <th>Daily $</th>
+            <th>Daily tokens</th>
+            <th>Monthly $</th>
+            <th></th>
+          </tr>
+        </thead>
         <tbody>
           ${data.users
-            .map(
-              (u) => `<tr>
-                <td>${escapeHtml(u.email || `${u.userId.slice(0, 8)}…`)}</td>
-                <td>${u.callCount}</td>
-                <td>${u.totalTokens.toLocaleString()}</td>
-                <td>${adminFormatCost(u.totalCostUsd)}</td>
-                <td>${u.lastCallAt ? new Date(u.lastCallAt).toLocaleString() : "—"}</td>
-              </tr>`
-            )
+            .map((u) => {
+              const overDaily =
+                (u.limits.dailyBudgetUsd != null && u.today.totalCostUsd >= u.limits.dailyBudgetUsd) ||
+                (u.limits.dailyTokenLimit != null && u.today.totalTokens >= u.limits.dailyTokenLimit);
+              const overMonth =
+                u.limits.monthlyBudgetUsd != null && u.month.totalCostUsd >= u.limits.monthlyBudgetUsd;
+              return `<tr data-user-id="${u.userId}" class="${overDaily || overMonth ? "over-limit" : ""}">
+                <td>
+                  <strong>${escapeHtml(u.email || `${u.userId.slice(0, 8)}…`)}</strong>
+                  ${u.isAdmin ? '<span class="admin-pill">admin</span>' : ""}
+                  <div class="muted xs">${u.lastCallAt ? new Date(u.lastCallAt).toLocaleString() : "No calls"}</div>
+                </td>
+                <td class="tabular-nums">
+                  ${adminFormatCost(u.today.totalCostUsd)}<br>
+                  <span class="muted">${u.today.totalTokens.toLocaleString()} tok</span>
+                </td>
+                <td class="tabular-nums">
+                  ${adminFormatCost(u.month.totalCostUsd)}<br>
+                  <span class="muted">${u.month.totalTokens.toLocaleString()} tok</span>
+                </td>
+                <td><input type="number" min="0" step="0.01" class="limit-input" data-field="dailyBudgetUsd" value="${u.limits.dailyBudgetUsd ?? ""}" placeholder="—" /></td>
+                <td><input type="number" min="0" step="1" class="limit-input" data-field="dailyTokenLimit" value="${u.limits.dailyTokenLimit ?? ""}" placeholder="—" /></td>
+                <td><input type="number" min="0" step="0.01" class="limit-input" data-field="monthlyBudgetUsd" value="${u.limits.monthlyBudgetUsd ?? ""}" placeholder="—" /></td>
+                <td><button type="button" class="btn secondary sm btn-save-limits">Save</button></td>
+              </tr>`;
+            })
             .join("")}
         </tbody>
-      </table>`;
+      </table>`}`;
+
+    users.querySelectorAll(".btn-save-limits").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const row = btn.closest("tr");
+        const userId = row?.dataset.userId;
+        if (!userId) return;
+        const parseField = (field) => {
+          const input = row.querySelector(`[data-field="${field}"]`);
+          const raw = input?.value?.trim() ?? "";
+          if (!raw) return null;
+          const n = Number(raw);
+          if (!Number.isFinite(n) || n <= 0) throw new Error("Limits must be positive or empty.");
+          return n;
+        };
+        btn.disabled = true;
+        try {
+          await updateAdminUserLimits(userId, {
+            dailyBudgetUsd: parseField("dailyBudgetUsd"),
+            dailyTokenLimit: parseField("dailyTokenLimit"),
+            monthlyBudgetUsd: parseField("monthlyBudgetUsd"),
+          });
+          showStatus("Limits saved.", "ok");
+          void renderAdminTab();
+        } catch (e) {
+          showStatus(e.message, "err");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
     recent.innerHTML = data.recentLogs
       .map(
         (log) => `<div class="admin-log-row">
-          <div><strong>${escapeHtml(log.label)}</strong><br><span class="muted">${new Date(log.created_at).toLocaleString()} · ${escapeHtml(log.model)}</span></div>
-          <div class="admin-log-cost">${adminFormatCost(Number(log.cost_usd))}</div>
+          <div><strong>${escapeHtml(log.label || "API")}</strong><br><span class="muted">${new Date(log.created_at).toLocaleString()} · ${escapeHtml(log.model || "")}</span></div>
+          <div class="admin-log-cost">${adminFormatCost(Number(log.cost_usd || 0))}</div>
         </div>`
       )
       .join("");
@@ -1887,7 +1969,12 @@ function bindUi() {
 
   $("#btnSaveSettings").addEventListener("click", async () => {
     await setApiBase($("#appBaseUrl").value);
-    await setSupabaseConfig($("#supabaseUrl").value, $("#supabaseAnonKey").value);
+    const url = $("#supabaseUrl").value.trim();
+    const anonKey = $("#supabaseAnonKey").value.trim();
+    if (url || anonKey) {
+      const current = await getSupabaseConfig();
+      await setSupabaseConfig(url || current.url, anonKey || current.anonKey);
+    }
     await setFlowSettings({
       autoRun: $("#flowAutoRun").checked,
       autoPipeline: $("#autoPipeline")?.checked !== false,
@@ -1902,6 +1989,40 @@ function bindUi() {
     void renderFlowSettingsSummary();
   });
 
+  $("#btnSignIn").addEventListener("click", () => void onSignIn());
+
+  $("#authPassword")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void onSignIn();
+  });
+
+  async function onSignIn() {
+    const errEl = $("#authError");
+    errEl.classList.add("hidden");
+    const email = $("#authEmail").value.trim();
+    const password = $("#authPassword").value;
+    if (!email || !password) {
+      errEl.textContent = "Email and password required.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+    $("#btnSignIn").disabled = true;
+    try {
+      await signIn(email, password);
+      $("#authPassword").value = "";
+      await refreshAuthUi();
+    } catch (e) {
+      errEl.textContent = e instanceof Error ? e.message : String(e);
+      errEl.classList.remove("hidden");
+    } finally {
+      $("#btnSignIn").disabled = false;
+    }
+  }
+
+  $("#btnSignOut").addEventListener("click", async () => {
+    await signOut();
+    await refreshAuthUi();
+  });
+
   $("#btnSyncAuth").addEventListener("click", async () => {
     const tabs = await chrome.tabs.query({});
     const appTab = tabs.find(
@@ -1912,7 +2033,9 @@ function bindUi() {
           t.url.includes("vercel.app"))
     );
     if (!appTab?.id) {
-      $("#authStatus").textContent = "Open Video Flow website in a tab first.";
+      const errEl = $("#authError");
+      errEl.textContent = "Open Video Flow in a browser tab first, then try again.";
+      errEl.classList.remove("hidden");
       return;
     }
     try {
@@ -1941,9 +2064,9 @@ function bindUi() {
 async function loadSettings() {
   const base = await getApiBase();
   $("#appBaseUrl").value = base;
-  const cfg = await getSupabaseConfig();
-  $("#supabaseUrl").value = cfg.url ?? "";
-  $("#supabaseAnonKey").value = cfg.anonKey ?? "";
+  const overrides = await getSupabaseConfigOverrides();
+  $("#supabaseUrl").value = overrides.url ?? "";
+  $("#supabaseAnonKey").value = overrides.anonKey ?? "";
   const flow = await getFlowSettings();
   $("#flowAutoRun").checked = flow.autoRun !== false;
   $("#flowAspect").value = flow.aspectRatio ?? "9:16";

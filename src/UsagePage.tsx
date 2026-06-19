@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Coins, Loader2, Save } from "lucide-react";
+import { ArrowLeft, Coins, Loader2 } from "lucide-react";
 import {
   fetchDailySummariesFromDb,
   fetchRecentUsageLogs,
   fetchUsageBalance,
   formatCostUsd,
   formatTokens,
-  saveMonthlyBudget,
   type UsageBalanceSummary,
 } from "./utils/aiUsageDb.ts";
 import { formatUsageLine, type AiUsageDaySummary, type AiUsageLogEntry, AI_USAGE_DB_CHANGED_EVENT } from "./utils/aiUsage.ts";
@@ -43,8 +42,6 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
   const [days, setDays] = useState<AiUsageDaySummary[]>([]);
   const [recent, setRecent] = useState<AiUsageLogEntry[]>([]);
   const [cloneProjects, setCloneProjects] = useState<CloneProject[]>([]);
-  const [budgetInput, setBudgetInput] = useState("");
-  const [savingBudget, setSavingBudget] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
@@ -61,9 +58,6 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
       setDays(dayRows);
       setRecent(logs);
       setCloneProjects(clones);
-      setBudgetInput(
-        bal.monthlyBudgetUsd != null ? String(bal.monthlyBudgetUsd) : ""
-      );
     } catch (e) {
       console.error("UsagePage load failed", e);
       const msg =
@@ -86,23 +80,11 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
     return () => window.removeEventListener(AI_USAGE_DB_CHANGED_EVENT, onDbChange);
   }, [reload]);
 
-  const saveBudget = async () => {
-    setSavingBudget(true);
-    try {
-      const trimmed = budgetInput.trim();
-      const val = trimmed === "" ? null : parseFloat(trimmed);
-      if (val != null && (!Number.isFinite(val) || val < 0)) {
-        setError("Budget khass ykon ra9m positif wla khawi.");
-        return;
-      }
-      await saveMonthlyBudget(userId, val);
-      await reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Budget save failed");
-    } finally {
-      setSavingBudget(false);
-    }
-  };
+  const hasLimits =
+    balance &&
+    (balance.dailyBudgetUsd != null ||
+      balance.dailyTokenLimit != null ||
+      balance.monthlyBudgetUsd != null);
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-16">
@@ -165,48 +147,52 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
               </div>
             </div>
 
-            <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm space-y-3">
-              <h2 className="font-semibold text-gray-800">Monthly budget (USD)</h2>
-              <p className="text-sm text-gray-600">
-                Optional cap — kan7sbou chno bqa lik had ch-hr.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  placeholder="e.g. 50"
-                  className="flex-1 min-w-[8rem] px-3 py-2 border border-gray-200 rounded-xl"
-                  value={budgetInput}
-                  onChange={(e) => setBudgetInput(e.target.value)}
-                />
-                <button
-                  type="button"
-                  disabled={savingBudget}
-                  onClick={() => void saveBudget()}
-                  className="px-4 py-2 bg-emerald-600 text-white rounded-xl font-medium flex items-center gap-2 disabled:opacity-50"
-                >
-                  {savingBudget ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Save className="w-4 h-4" />
-                  )}
-                  Save
-                </button>
-              </div>
-              {balance.monthlyBudgetUsd != null ? (
-                <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-3 text-sm">
-                  <span className="text-emerald-900 font-medium">Balance remaining: </span>
-                  <span className="font-bold text-emerald-800 tabular-nums">
-                    {formatCostUsd(balance.budgetRemainingUsd ?? 0)}
-                  </span>
-                  <span className="text-emerald-800/70">
-                    {" "}
-                    / {formatCostUsd(balance.monthlyBudgetUsd)} budget
-                  </span>
+            {hasLimits ? (
+              <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm space-y-3">
+                <h2 className="font-semibold text-gray-800">Your limits (set by admin)</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                  <div className="rounded-xl bg-gray-50 border border-gray-100 p-3">
+                    <p className="text-xs text-gray-500 uppercase font-semibold">Daily $</p>
+                    <p className="font-bold tabular-nums mt-1">
+                      {balance.dailyBudgetUsd != null
+                        ? `${formatCostUsd(balance.today.totalCostUsd)} / ${formatCostUsd(balance.dailyBudgetUsd)}`
+                        : "No cap"}
+                    </p>
+                    {balance.dailyBudgetRemainingUsd != null ? (
+                      <p className="text-xs text-gray-500 mt-1">
+                        {formatCostUsd(balance.dailyBudgetRemainingUsd)} left today
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="rounded-xl bg-gray-50 border border-gray-100 p-3">
+                    <p className="text-xs text-gray-500 uppercase font-semibold">Daily tokens</p>
+                    <p className="font-bold tabular-nums mt-1">
+                      {balance.dailyTokenLimit != null
+                        ? `${formatTokens(balance.today.totalTokens)} / ${formatTokens(balance.dailyTokenLimit)}`
+                        : "No cap"}
+                    </p>
+                    {balance.dailyTokensRemaining != null ? (
+                      <p className="text-xs text-gray-500 mt-1">
+                        {formatTokens(balance.dailyTokensRemaining)} left today
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="rounded-xl bg-gray-50 border border-gray-100 p-3">
+                    <p className="text-xs text-gray-500 uppercase font-semibold">Monthly $</p>
+                    <p className="font-bold tabular-nums mt-1">
+                      {balance.monthlyBudgetUsd != null
+                        ? `${formatCostUsd(balance.month.totalCostUsd)} / ${formatCostUsd(balance.monthlyBudgetUsd)}`
+                        : "No cap"}
+                    </p>
+                    {balance.budgetRemainingUsd != null ? (
+                      <p className="text-xs text-gray-500 mt-1">
+                        {formatCostUsd(balance.budgetRemainingUsd)} left this month
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
 
             {Object.keys(balance.today.byOperation).length > 0 ? (
               <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
