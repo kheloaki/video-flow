@@ -690,6 +690,18 @@ textarea {
   margin: 0;
 }
 
+.scene-scene-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.scene-scene-actions .btn.sm {
+  font-size: 11px;
+  padding: 6px 10px;
+}
+
 .scene-card .actions {
   display: flex;
   flex-wrap: wrap;
@@ -729,6 +741,17 @@ textarea {
   background: rgba(239, 68, 68, 0.12);
   border-color: rgba(239, 68, 68, 0.35);
   color: #fecaca;
+}
+
+.vision-lock-banner {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .queue-item {
@@ -1096,6 +1119,57 @@ textarea {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.4;
+}
+
+.pipeline-mode-choice {
+  border: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pipeline-mode-choice legend {
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: var(--surface2);
+}
+
+.mode-option:has(input:checked) {
+  border-color: var(--violet);
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.mode-option input {
+  margin-top: 3px;
+  accent-color: var(--violet);
+}
+
+.mode-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.mode-option-body strong {
+  font-size: 13px;
+}
+
+.mode-option-body .muted {
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .flow-settings-summary {

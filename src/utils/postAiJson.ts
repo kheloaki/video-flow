@@ -1,6 +1,11 @@
 import { apiUrl } from "../apiBase";
 import { recordAiUsageFromResponse } from "./aiUsage";
 import { getApiAuthHeader } from "./apiAuth";
+import { isAiRateLimitError, parseOpenAiRetryMs, withAiRateLimitRetry } from "./aiRateLimitRetry";
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function fetchWithTimeout(
   url: string,
@@ -32,33 +37,40 @@ export async function postAiJson(
   timeoutMs: number,
   label?: string
 ): Promise<Record<string, unknown>> {
-  const authHeaders = await getApiAuthHeader();
-  const res = await fetchWithTimeout(apiUrl(path), body, timeoutMs, authHeaders);
-  const rawText = await res.text();
-  const ct = res.headers.get("content-type") ?? "";
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(rawText) as Record<string, unknown>;
-  } catch {
+  return withAiRateLimitRetry(async () => {
+    const authHeaders = await getApiAuthHeader();
+    const res = await fetchWithTimeout(apiUrl(path), body, timeoutMs, authHeaders);
+    const rawText = await res.text();
+    const ct = res.headers.get("content-type") ?? "";
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      if (!res.ok) {
+        const hint =
+          rawText.trim() === ""
+            ? ` Body khawi — 9lban timeout wla crash. Content-Type: ${ct || "?"}`
+            : "";
+        throw new Error((rawText.trim().slice(0, 500) || `HTTP ${res.status}`) + hint);
+      }
+      throw new Error("Natija dial server ma-shi JSON.");
+    }
     if (!res.ok) {
-      const hint =
-        rawText.trim() === ""
-          ? ` Body khawi — 9lban timeout wla crash. Content-Type: ${ct || "?"}`
-          : "";
-      throw new Error((rawText.trim().slice(0, 500) || `HTTP ${res.status}`) + hint);
+      const errMsg = typeof data.error === "string" ? data.error.trim() : "";
+      const bodyText = rawText.trim().slice(0, 500) || `HTTP ${res.status}`;
+      if (bodyText.includes("FUNCTION_INVOCATION_FAILED")) {
+        throw new Error(
+          "Vercel server crash (FUNCTION_INVOCATION_FAILED) — 9rib tsawer kbira bzaf f request. Kan-compressiw auto; 3awd analyze. Ila baqi, chof Vercel logs."
+        );
+      }
+      const msg = errMsg || bodyText;
+      if (isAiRateLimitError(msg, res.status)) {
+        const waitMs = parseOpenAiRetryMs(msg);
+        if (waitMs) await sleep(waitMs);
+      }
+      throw new Error(msg);
     }
-    throw new Error("Natija dial server ma-shi JSON.");
-  }
-  if (!res.ok) {
-    const errMsg = typeof data.error === "string" ? data.error.trim() : "";
-    const body = rawText.trim().slice(0, 500) || `HTTP ${res.status}`;
-    if (body.includes("FUNCTION_INVOCATION_FAILED")) {
-      throw new Error(
-        "Vercel server crash (FUNCTION_INVOCATION_FAILED) — 9rib tsawer kbira bzaf f request. Kan-compressiw auto; 3awd analyze. Ila baqi, chof Vercel logs."
-      );
-    }
-    throw new Error(errMsg || body);
-  }
-  if (label) recordAiUsageFromResponse(data, label);
-  return data;
+    if (label) recordAiUsageFromResponse(data, label);
+    return data;
+  });
 }

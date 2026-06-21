@@ -30,6 +30,10 @@ export type VeoSceneAnalyzeRequestBody = {
   /** Veo output length to plan beats for (default 8). */
   veoOutputDurationSec?: number;
   sceneNumber?: number;
+  /** All scene frames in order: debut → … → fin (clone workflow). */
+  sceneFrameImageUrls?: string[];
+  /** Seconds in source video for each frame in sceneFrameImageUrls. */
+  sceneFrameTimesSec?: number[];
 };
 
 export type VeoSceneAnalyzeResult =
@@ -126,6 +130,8 @@ function omitTextOnScreen(pkg: unknown): unknown {
   return pkg;
 }
 
+export const CLONE_LANGUAGE_LABEL = "ambient source audio only (no spoken dialogue)";
+
 function buildVeoPackageUserPrompt(args: {
   fullScript: string;
   sceneNumber: number;
@@ -134,56 +140,41 @@ function buildVeoPackageUserPrompt(args: {
   workflowMode?: "ad" | "clone";
 }): string {
   const { fullScript, sceneNumber, imageAnalysis, languageLabel, workflowMode = "ad" } = args;
-  const langJson = JSON.stringify(languageLabel);
-  const cloneModeBlock =
-    workflowMode === "clone"
-      ? `
-CLONE VIDEO MODE (mandatory — same package depth as Video Flow in-app Veo):
-- The FULL SCRIPT is a reference-video clone breakdown + SCENE METADATA, not a brand-new ad brief.
-- Your job is to reproduce the reference clip for scene ${sceneNumber} using IMAGE ANALYSIS as the motion ground truth (debut still → fin still over 8 seconds).
-- The IMAGE ANALYSIS contains "CHANGES A → B" and "TIMED ACTION SPLIT" — use TIMED ACTION SPLIT as the beat-by-beat motion schedule; veoPrompt actionFlow must mirror those windows exactly.
-- veoPrompt MUST be long-form and production-ready: target 400–700+ words in clear English. Structure it like a senior Veo operator brief: opening frame, talent identity, wardrobe, room/background, lighting, lens feel (smartphone handheld), beat-by-beat subject motion, hands/face/hair, product handling if visible, expression arc, camera path, pacing for 8.0s, ambience, lip-sync only if reference shows speaking.
-- negativePrompt MUST be a long comma-separated list (20+ constraints): identity drift, outfit change, room swap, captions, subtitles, watermark, bad anatomy, extra fingers, cinematic gloss, etc.
-- Fill EVERY JSON field with substantive content — no empty strings except voiceover fields when the reference is clearly silent.
-- actionFlow: all four 2-second blocks with specific action, expression, camera notes.
-- shotDesign, motionPlan, continuity.mustPreserve (array of 6+ items), generationNotes: all detailed.
-- Do NOT output a short or one-paragraph veoPrompt — match the richness of full Video Flow Veo packages.
+  const isClone = workflowMode === "clone";
+  const langJson = JSON.stringify(isClone ? CLONE_LANGUAGE_LABEL : languageLabel);
 
+  const cloneModeBlock = isClone
+    ? `
+CLONE VIDEO MODE (mandatory):
+- Reproduce the REFERENCE clip for scene ${sceneNumber} — not a new ad concept.
+- IMAGE ANALYSIS is ground truth: use "PROGRESSION A → … → B" (every reference frame), "CHANGES A → B", and "TIMED ACTION SPLIT" as the motion schedule.
+- veoPrompt: 400–700+ words in clear English — opening frame, environment, subjects, props, lighting, lens feel, beat-by-beat motion mapped to TIMED ACTION SPLIT, camera path, pacing for 8.0s.
+- Include an "Audio / ambience" paragraph: environmental sounds from reference (tools, machinery, footsteps, wind, impacts, room tone). NO scripted narration.
+- negativePrompt: 20+ comma-separated constraints (identity drift, captions, watermark, bad anatomy, etc.).
+- actionFlow, shotDesign, motionPlan, continuity.mustPreserve (6+ items), generationNotes: all detailed.
 `
-      : "";
+    : "";
 
-  return `Generate one final VEO 3.1 scene package for a single Moroccan UGC ${workflowMode === "clone" ? "clone-reference" : "ad"} scene.
+  const creativeRules = isClone
+    ? `Creative rules (CLONE — reference reproduction):
+- Match the reference content type (construction timelapse, B-roll, demo, lifestyle, etc.) — do NOT force UGC talking-head if reference has none.
+- Vertical 9:16 unless reference implies otherwise.
+- Ultra-realistic; motion interpolates debut → every intermediate state → fin across 8 seconds.
+- Use TIMED ACTION SPLIT beats exactly — one major change per window, never all at once.
+- Preserve everything listed under WHAT STAYED THE SAME in IMAGE ANALYSIS.
 
-You are creating only one scene, not the full ad.
-${cloneModeBlock}
+Audio rules (CRITICAL — no Darija / no voiceover script):
+- Default: ambient source audio ONLY — sounds that belong in the reference scene (machinery, tools, footsteps, wind, water, impacts, room tone).
+- voiceoverDarija and voiceoverDarijaClearTTS MUST remain empty strings "".
+- speaker.isSpeakingToCamera: false and speaker.lipSyncRequired: false UNLESS IMAGE ANALYSIS explicitly confirms visible on-camera speech with lip movement.
+- Do NOT invent marketing copy, Darija, Arabic, French, or English narration.
+- In veoPrompt, describe ambient sound bed briefly; do NOT write dialogue lines.
 
-Inputs:
-
-FULL SCRIPT:
-${fullScript}
-
-
-SCENE NUMBER:${sceneNumber}
-
-
-IMAGE ANALYSIS:
-${imageAnalysis}
-
-
-Your job:
-Read the full script, identify the requested scene using the scene number, extract the correct scene information, then use the image analysis as the main visual continuity source to generate one final detailed VEO 3.1 scene package.
-
-Important:
-- The full script contains the product context, format, platform, generation model, duration, total scenes, scene titles, goals, visuals, voiceover, and flow.
-- You must identify the correct scene from the script using the given scene number only.
-- You must use the image analysis as the main source of truth for visual continuity and motion.
-- Return valid JSON only.
-- Do not return markdown.
-- Do not explain anything.
-- Do not add any text before or after the JSON.
-- Output exactly one JSON object.
-
-Creative rules:
+Scene extraction rules:
+- Extract only scene ${sceneNumber}.
+- sceneGoal = reproduce reference visual + ambient audio for this beat.
+- Ignore ad-style hooks/CTA unless clearly present in reference.`
+    : `Creative rules:
 - The scene must feel like a real Moroccan TikTok / Reels UGC ad.
 - Keep it vertical 9:16 unless the script clearly says otherwise.
 - Keep it ultra-realistic.
@@ -196,69 +187,73 @@ Creative rules:
 
 Scene extraction rules:
 - Extract only the selected scene.
-- Extract or infer:
-  - scene name
-  - scene goal
-  - visual role of the scene
-  - whether the scene is hook, product intro, usage, proof, result, or CTA
-  - scene voiceover
-  - whether the woman is speaking to camera
-  - whether product is visible
+- Extract or infer: scene name, scene goal, visual role, voiceover, whether speaking to camera, product visibility.
 - Do not mix details from other scenes except if needed for continuity.
-
-On-screen text / overlays (IMPORTANT):
-- Do NOT include a "textOnScreen" field in your JSON. Omit it completely.
-- Do NOT propose CapCut/Reels overlay lines, sticker copy, hook text, prices, CTAs as text, or "lines"/"rationale" for post-production anywhere in this package.
-- veoPrompt and negativePrompt must keep Veo clean: no baked subtitles, captions, lower-thirds, or readable UI text unless the source script explicitly requires one specific real-world sign already in the scene (rare); when unsure, describe visuals only with no readable text.
-
-Continuity rules:
-- Preserve the same woman identity.
-- Preserve the same face, same hair, same outfit, same room, same lighting, same background, and same vibe when continuity is required.
-- Preserve all important details found in the image analysis.
-- The scene must feel like a smooth transition, not two disconnected frames.
 
 Speaking rules:
 - If the selected scene includes speaking or voiceover, the woman in the video must be the one speaking directly to camera.
 - Explicitly mention natural realistic lip sync and believable mouth movement.
-- Make it feel like real UGC speaking, not an external voiceover.
+- Make it feel like real UGC speaking, not an external voiceover.`;
+
+  const continuityRules = isClone
+    ? `Continuity rules:
+- Preserve all anchors from IMAGE ANALYSIS (identity, outfit, environment, props, camera rig when static).
+- Smooth transition through every intermediate frame state — not a jump cut from A to B.`
+    : `Continuity rules:
+- Preserve the same woman identity, face, hair, outfit, room, lighting, background when continuity is required.
+- Preserve all important details found in the image analysis.
+- The scene must feel like a smooth transition, not two disconnected frames.`;
+
+  const sceneIntro = isClone
+    ? "reference-video CLONE"
+    : "Moroccan UGC ad";
+
+  return `Generate one final VEO 3.1 scene package for a single ${sceneIntro} scene.
+
+You are creating only one scene.
+${cloneModeBlock}
+
+Inputs:
+
+FULL SCRIPT:
+${fullScript}
+
+SCENE NUMBER:${sceneNumber}
+
+IMAGE ANALYSIS:
+${imageAnalysis}
+
+Your job:
+Read the full script, identify scene ${sceneNumber}, then use IMAGE ANALYSIS as the main visual continuity source for one detailed VEO 3.1 scene package.
+
+Important:
+- Return valid JSON only. No markdown. No text before or after the JSON.
+
+${creativeRules}
+
+On-screen text / overlays (IMPORTANT):
+- Do NOT include a "textOnScreen" field. Omit it completely.
+- veoPrompt and negativePrompt: no baked subtitles, captions, or readable UI text unless a real-world sign is explicitly required in reference.
+
+${continuityRules}
 
 Product rules:
-- If the selected scene includes a visible product, keep the exact same bottle design, label, cap, colors, illustration, and packaging unchanged.
-- Keep the label readable when visible.
-- Never redesign the product.
+- If a product is visible, keep packaging/design unchanged; label readable when visible.
 
 Visual rules:
-- Use the image analysis to infer:
-  - facial expression progression
-  - hand movement
-  - hair movement
-  - camera framing
-  - implied motion
-  - environment continuity
-  - realism risks
-- Reference stills may contain incidental text: ignore it for Veo continuity unless the script explicitly requires echoing a specific real sign; never invent overlay or caption copy in this JSON.
+- Use IMAGE ANALYSIS for expression, hands, hair, camera, implied motion, environment, realism risks.
+- Reference every frame progression when present in analysis — not only debut/fin endpoints.
 
-Naturally include these constraints inside the final prompt and negative prompt:
-- no subtitles
-- no captions
-- no watermark
-- no logo
-- no fake UI
-- no unnecessary graphics
-- no identity drift
-- no outfit change
-- no room change
-- no lighting change
-- no bad anatomy
-- no extra fingers
-- no unrealistic beauty filter
-- no exaggerated transformation
-- no chaotic camera shake
-- no over-cinematic glossy commercial style
+Naturally include in veoPrompt and negativePrompt:
+- no subtitles, no captions, no watermark, no logo, no fake UI
+- no identity drift, no outfit change, no room swap (unless reference changes it)
+- no bad anatomy, no extra fingers, no chaotic shake
+${isClone ? "- no spoken dialogue, no voiceover narration, no Darija/Arabic speech (ambient sound only unless reference shows speech)" : ""}
 
-Use this exact JSON string value for the field "language" unless the script clearly specifies another spoken language for this scene: ${langJson}
+Use this exact JSON string for the field "language": ${langJson}
+${isClone ? "- voiceoverDarija and voiceoverDarijaClearTTS must be empty strings." : ""}
 
-Return exactly this JSON structure (fill every string field; booleans and numbers as appropriate; sceneNumber must be ${sceneNumber}):
+Return exactly this JSON structure (sceneNumber must be ${sceneNumber}):
 
 {
   "sceneNumber": ${sceneNumber},
@@ -278,7 +273,7 @@ Return exactly this JSON structure (fill every string field; booleans and number
     "isSpeakingToCamera": false,
     "speakerType": "",
     "deliveryTone": "",
-    "lipSyncRequired": true
+    "lipSyncRequired": ${isClone ? "false" : "true"}
   },
   "productVisibility": {
     "visible": false,
@@ -522,8 +517,72 @@ VEO RISKS & NOTES:
 - Elements to exclude from generation (overlays, watermarks):
 - Realism flags:
 
+AUDIO / SOUND (ambient only unless speech visible in reference):
+- Environmental sounds:
+- Tool / machine / impact sounds:
+- Visible speech / lip sync: [none | describe]
+- Veo: ambient source audio; NO Darija/Arabic/French voiceover script
+
 One-Line Summary for Prompt Writer:
-[Single sentence: what must happen visually from A to B in 8 seconds]`;
+[Single sentence: visual motion A → B in 8 seconds; ambient sound only unless speech visible]`;
+
+const VISION_USER_PROMPT_CLONE_MULTI = `You are a reference-video frame analyst for CLONE / reproduction workflows.
+
+{{FRAME_COUNT}} images are attached IN ORDER — COMPLETE scene from START through EVERY intermediate frame to END:
+- IMAGE 1 = debut | IMAGES 2..{{FRAME_COUNT_MINUS_ONE}} = intermediate (mandatory) | IMAGE {{FRAME_COUNT}} = fin
+
+Frame timestamps (seconds):
+{{FRAME_TIMES_LIST}}
+
+Veo generates {{VEO_DURATION}}s video: IMAGE 1 → … → IMAGE {{FRAME_COUNT}} honoring ALL intermediate states.
+
+DEBUT_PROMPT: {{DEBUT}}
+FIN_PROMPT: {{FIN}}
+{{TIMING_BLOCK}}
+
+CRITICAL:
+- Analyze ALL {{FRAME_COUNT}} images individually — skipping frames is forbidden.
+- For each frame i→i+1, list every visible delta (even subtle: hands, shadows, tools, dust).
+- PROGRESSION + CHANGES A → B are most important. TIMED ACTION SPLIT: one beat per change.
+- Overlays = post-production only. Do NOT invent dialogue/voiceover — note ambient sounds only.
+
+Plain text only. No JSON. No VEO prompt.
+
+Scene Type:
+[construction/timelapse | demo | B-roll | lifestyle | UGC | other]
+
+PROGRESSION A → … → B (exactly {{FRAME_COUNT}} entries — one per attached image):
+For i = 1..{{FRAME_COUNT}}:
+  Frame [i] @ [time]s:
+  - Snapshot: people, subject, environment, structures, machinery/props, camera, lighting, overlays
+  - Delta vs frame i-1: [all changes or "—" for i=1]
+
+IMAGE A / IMAGE B — summary snapshots (debut + fin)
+
+WHAT STAYED THE SAME:
+
+CHANGES A → B (use ALL frames; cite frame numbers):
+- Cumulative frame-by-frame changes:
+- People / subject / terrain / objects / machinery / camera / lighting:
+- Top 5 Veo must animate (ranked, mapped to frames):
+
+TIMED ACTION SPLIT (0.0–{{VEO_DURATION}}s):
+Beat | change | window | viewer sees | source frames
+
+8-SECOND MOTION PLAN:
+- 0.0–2.0s / 2.0–4.0s / 4.0–6.0s / 6.0–{{VEO_DURATION}}s (tie to frame progression)
+
+AUDIO / SOUND (ambient only unless speech visible):
+- Environmental / ambient sounds:
+- Tool / machine / impact sounds:
+- Visible speech / lip sync: [none | describe]
+- Music / narration: [none | yes]
+- Veo: ambient source audio bed; NO Darija/Arabic/French/English voiceover script
+
+VEO RISKS & NOTES:
+
+One-Line Summary:
+[Motion through all {{FRAME_COUNT}} frames in {{VEO_DURATION}}s; ambient audio unless speech visible]`;
 
 function buildVisionTimingBlock(args: {
   sceneNumber?: number;
@@ -559,6 +618,8 @@ function buildVisionUserText(
     referenceDebutSec?: number;
     referenceFinSec?: number;
     veoOutputDurationSec?: number;
+    frameCount?: number;
+    frameTimesSec?: number[];
   }
 ): string {
   const veoDuration = timing?.veoOutputDurationSec ?? 8;
@@ -567,10 +628,33 @@ function buildVisionUserText(
     Number.isFinite(timing?.referenceFinSec)
       ? Math.max(0, (timing!.referenceFinSec as number) - (timing!.referenceDebutSec as number))
       : 0;
-  const template = workflowMode === "clone" ? VISION_USER_PROMPT_CLONE : VISION_USER_PROMPT_AD;
+  const frameCount = timing?.frameCount ?? 2;
+  const useMulti = workflowMode === "clone" && frameCount > 2;
+  const template = useMulti
+    ? VISION_USER_PROMPT_CLONE_MULTI
+    : workflowMode === "clone"
+      ? VISION_USER_PROMPT_CLONE
+      : VISION_USER_PROMPT_AD;
+  const times = timing?.frameTimesSec ?? [];
+  const frameTimesList =
+    times.length > 0
+      ? times.map((t, i) => `  - Image ${i + 1}: ${Number(t).toFixed(2)}s`).join("\n")
+      : "  (timestamps not provided)";
+  const frameATime =
+    times.length > 0 ? Number(times[0]).toFixed(2) : String(timing?.referenceDebutSec ?? "?");
+  const frameBTime =
+    times.length > 0
+      ? Number(times[times.length - 1]).toFixed(2)
+      : String(timing?.referenceFinSec ?? "?");
+
   return template
     .replace("{{DEBUT}}", debutPrompt || "(none)")
     .replace("{{FIN}}", finPrompt || "(none)")
+    .replace(/\{\{FRAME_COUNT\}\}/g, String(frameCount))
+    .replace(/\{\{FRAME_COUNT_MINUS_ONE\}\}/g, String(Math.max(1, frameCount - 1)))
+    .replace("{{FRAME_TIMES_LIST}}", frameTimesList)
+    .replace(/\{\{FRAME_A_TIME\}\}/g, frameATime)
+    .replace(/\{\{FRAME_B_TIME\}\}/g, frameBTime)
     .replace(
       "{{TIMING_BLOCK}}",
       workflowMode === "clone"
@@ -600,11 +684,6 @@ export async function runVeoSceneAnalyze(
   const finPrompt = typeof body.finPrompt === "string" ? body.finPrompt.trim() : "";
   const workflowMode =
     body.workflowMode === "clone" || body.workflowMode === "ad" ? body.workflowMode : "ad";
-  const usesInlineImages =
-    debutImageUrl.startsWith("data:") || finImageUrl.startsWith("data:");
-  /** `high` only with HTTPS URLs — data URLs on Vercel are already compressed client-side. */
-  const imageDetail =
-    workflowMode === "clone" && !usesInlineImages ? "high" : "auto";
   const veoOutputDurationSec =
     typeof body.veoOutputDurationSec === "number" && body.veoOutputDurationSec > 0
       ? body.veoOutputDurationSec
@@ -618,54 +697,84 @@ export async function runVeoSceneAnalyze(
   const referenceFinSec =
     typeof body.referenceFinSec === "number" ? body.referenceFinSec : Number(body.referenceFinSec);
 
-  if (!debutImageUrl || !finImageUrl) {
+  const rawSceneFrames = Array.isArray(body.sceneFrameImageUrls)
+    ? body.sceneFrameImageUrls
+        .filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+        .map((u) => u.trim())
+    : [];
+  const imageUrls =
+    rawSceneFrames.length >= 2 ? rawSceneFrames : [debutImageUrl, finImageUrl].filter(Boolean);
+  const frameTimesSec = Array.isArray(body.sceneFrameTimesSec)
+    ? body.sceneFrameTimesSec.filter((t) => typeof t === "number" && Number.isFinite(t))
+    : [];
+
+  if (imageUrls.length < 2) {
     return { ok: false, status: 400, error: "debutImageUrl w finImageUrl (URLs dial tsawer) khasshom." };
   }
 
-  const inlinePayloadBytes =
-    (debutImageUrl.startsWith("data:") ? debutImageUrl.length : 0) +
-    (finImageUrl.startsWith("data:") ? finImageUrl.length : 0);
+  const usesInlineImages = imageUrls.some((u) => u.startsWith("data:"));
+  /** `high` only with HTTPS URLs — data URLs on Vercel are already compressed client-side. */
+  const imageDetail =
+    workflowMode === "clone" && !usesInlineImages ? "high" : "auto";
+
+  const inlinePayloadBytes = imageUrls.reduce(
+    (sum, u) => sum + (u.startsWith("data:") ? u.length : 0),
+    0
+  );
   if (inlinePayloadBytes > 3_800_000) {
     return {
       ok: false,
       status: 413,
       error:
-        "Tsawer kbira bzaf f request (data URL). Compressiw frames wla uploadiw b UploadThing — max ~3.5MB l-jouj tsawer.",
+        "Tsawer kbira bzaf f request (data URL). Compressiw frames wla uploadiw b UploadThing — max ~3.5MB total.",
     };
   }
 
+  const maxTokens =
+    workflowMode === "clone"
+      ? Math.min(8192, 4096 + Math.max(0, imageUrls.length - 2) * 400)
+      : 2048;
+
   try {
+    const visionContent: Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string; detail: string } }
+    > = [
+      {
+        type: "text",
+        text: buildVisionUserText(debutPrompt, finPrompt, workflowMode, {
+          sceneNumber: Number.isFinite(sceneNumber) ? sceneNumber : undefined,
+          referenceDebutSec: Number.isFinite(referenceDebutSec)
+            ? referenceDebutSec
+            : undefined,
+          referenceFinSec: Number.isFinite(referenceFinSec) ? referenceFinSec : undefined,
+          veoOutputDurationSec,
+          frameCount: imageUrls.length,
+          frameTimesSec:
+            frameTimesSec.length === imageUrls.length
+              ? frameTimesSec
+              : frameTimesSec.length > 0
+                ? frameTimesSec
+                : undefined,
+        }),
+      },
+      ...imageUrls.map((url) => ({
+        type: "image_url" as const,
+        image_url: { url, detail: imageDetail },
+      })),
+    ];
+
     const { content: analysisText, usage } = await openaiChat(
       [
         {
           role: "user",
-          content: [
-            {
-              type: "text",
-              text: buildVisionUserText(debutPrompt, finPrompt, workflowMode, {
-                sceneNumber: Number.isFinite(sceneNumber) ? sceneNumber : undefined,
-                referenceDebutSec: Number.isFinite(referenceDebutSec)
-                  ? referenceDebutSec
-                  : undefined,
-                referenceFinSec: Number.isFinite(referenceFinSec) ? referenceFinSec : undefined,
-                veoOutputDurationSec,
-              }),
-            },
-            {
-              type: "image_url",
-              image_url: { url: debutImageUrl, detail: imageDetail },
-            },
-            {
-              type: "image_url",
-              image_url: { url: finImageUrl, detail: imageDetail },
-            },
-          ],
+          content: visionContent,
         },
       ],
       0.3,
       apiKey,
       visionModel,
-      { max_tokens: workflowMode === "clone" ? 4096 : 2048, operation: "veo-scene-analyze" }
+      { max_tokens: maxTokens, operation: "veo-scene-analyze" }
     );
     return { ok: true, analysis: analysisText, usage };
   } catch (e) {
@@ -693,10 +802,14 @@ export async function runVeoScenePackageFromAnalysis(
   const sceneNumber = typeof body.sceneNumber === "number" ? body.sceneNumber : Number(body.sceneNumber);
   const imageAnalysis =
     typeof body.imageAnalysis === "string" ? body.imageAnalysis.trim() : "";
+  const workflowMode =
+    body.workflowMode === "clone" || body.workflowMode === "ad" ? body.workflowMode : "ad";
   const languageLabel =
-    typeof body.languageLabel === "string" && body.languageLabel.trim()
-      ? body.languageLabel.trim()
-      : "Moroccan Darija";
+    workflowMode === "clone"
+      ? CLONE_LANGUAGE_LABEL
+      : typeof body.languageLabel === "string" && body.languageLabel.trim()
+        ? body.languageLabel.trim()
+        : "Moroccan Darija";
 
   if (!fullScript || !Number.isFinite(sceneNumber) || sceneNumber < 1) {
     return { ok: false, status: 400, error: "fullScript w sceneNumber (>=1) khasshom ykouno m3molin." };
@@ -706,9 +819,6 @@ export async function runVeoScenePackageFromAnalysis(
   }
 
   try {
-    const workflowMode =
-      body.workflowMode === "clone" || body.workflowMode === "ad" ? body.workflowMode : "ad";
-
     const packagePrompt = buildVeoPackageUserPrompt({
       fullScript,
       sceneNumber,

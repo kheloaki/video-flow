@@ -7,8 +7,9 @@ import {
 } from "./lib/video-frames.js";
 import {
   buildCloneFullScript,
+  CLONE_LANGUAGE_LABEL,
 } from "./lib/clone-prompts.js";
-import { getApiBase, setApiBase, postAiJson } from "./lib/api.js";
+import { buildCloneAnalyzeRequest } from "./lib/clone-analyze.js";
 import { saveFrames, loadFrames } from "./lib/frame-store.js";
 import { loadEditClips, clearEditClips, saveEditClips } from "./lib/edit-clip-store.js";
 import {
@@ -44,7 +45,13 @@ import {
   probeVideoUrl,
 } from "./lib/video-edit.js";
 import { normalizeArrayBuffer, formatByteSize } from "./lib/video-buffer-utils.js";
-import { CLONE_AI_CONCURRENCY, runWithConcurrency } from "./lib/concurrency.js";
+import { CLONE_AI_CONCURRENCY, CLONE_AI_MIN_DELAY_MS, CLONE_ANALYZE_DELAY_MS, markAnalyzeFinished, runWithConcurrency, waitBeforeNextAnalyze } from "./lib/concurrency.js";
+import { postAiJson, getApiBase } from "./lib/api.js";
+import {
+  fetchVisionLockStatus,
+  releaseVisionAnalyzeLock,
+  visionLockWaitMessage,
+} from "./lib/vision-lock.js";
 
 const DRAFT_META_KEY = "vf_draft_meta";
 const ACTIVE_PROJECT_KEY = "vf_active_project_id";
@@ -75,12 +82,37 @@ const state = {
   promptsAutoTriggered: false,
   isAdmin: false,
   isGeneratingPrompts: false,
+  visionLockBlocked: null,
 };
 
 let persistTimer = null;
 let analyzePollTimer = null;
+let visionLockPollTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
+
+function cloneSceneToStored(s) {
+  return {
+    sceneNumber: s.sceneNumber,
+    debutIndex: s.debut.index,
+    finIndex: s.fin.index,
+    debutTimeSec: s.debut.timeSec,
+    finTimeSec: s.fin.timeSec,
+    debutUrl: s.debutUrl,
+    finUrl: s.finUrl,
+    analysis: s.analysis,
+    scenePackage: s.scenePackage,
+    veoPrompt: s.veoPrompt,
+    negativePrompt: s.negativePrompt,
+    parseError: s.parseError,
+    rawPackageText: s.rawPackageText,
+    analyzeStatus: s.analyzeStatus,
+    promptStatus: s.promptStatus,
+    usageAnalyze: s.usageAnalyze,
+    usagePrompt: s.usagePrompt,
+    error: s.error,
+  };
+}
 
 function buildCloneProjectData() {
   return {
@@ -90,22 +122,7 @@ function buildCloneProjectData() {
     sceneCount: String(state.sceneCount),
     boundaryIndices: state.boundaryIndices,
     frameMeta: state.frames.map((f) => ({ id: f.id, index: f.index, timeSec: f.timeSec })),
-    scenes: state.scenes.map((s) => ({
-      sceneNumber: s.sceneNumber,
-      debutIndex: s.debut.index,
-      finIndex: s.fin.index,
-      debutTimeSec: s.debut.timeSec,
-      finTimeSec: s.fin.timeSec,
-      analysis: s.analysis,
-      scenePackage: s.scenePackage,
-      veoPrompt: s.veoPrompt,
-      negativePrompt: s.negativePrompt,
-      analyzeStatus: s.analyzeStatus,
-      promptStatus: s.promptStatus,
-      usageAnalyze: s.usageAnalyze,
-      usagePrompt: s.usagePrompt,
-      error: s.error,
-    })),
+    scenes: state.scenes.map(cloneSceneToStored),
   };
 }
 
@@ -140,22 +157,7 @@ async function persistAll() {
     boundaryIndices: state.boundaryIndices,
     videoName: state.videoName,
     dbProjectId: state.dbProjectId,
-    scenes: state.scenes.map((s) => ({
-      sceneNumber: s.sceneNumber,
-      debutIndex: s.debut.index,
-      finIndex: s.fin.index,
-      debutTimeSec: s.debut.timeSec,
-      finTimeSec: s.fin.timeSec,
-      analysis: s.analysis,
-      scenePackage: s.scenePackage,
-      veoPrompt: s.veoPrompt,
-      negativePrompt: s.negativePrompt,
-      analyzeStatus: s.analyzeStatus,
-      promptStatus: s.promptStatus,
-      usageAnalyze: s.usageAnalyze,
-      usagePrompt: s.usagePrompt,
-      error: s.error,
-    })),
+    scenes: state.scenes.map(cloneSceneToStored),
   };
 
   await chrome.storage.local.set({
@@ -252,13 +254,30 @@ async function restoreFromMeta(meta, frameRows) {
         scenePackage: s.scenePackage,
         veoPrompt: s.veoPrompt,
         negativePrompt: s.negativePrompt,
+        parseError: s.parseError,
+        rawPackageText: s.rawPackageText,
+        debutUrl: s.debutUrl,
+        finUrl: s.finUrl,
         analyzeStatus:
           jobRunning && s.analyzeStatus === "loading"
             ? "loading"
             : s.analyzeStatus === "loading"
-              ? "idle"
+              ? s.analysis?.trim()
+                ? "done"
+                : "error"
               : (s.analyzeStatus ?? "idle"),
-        promptStatus: s.promptStatus ?? "idle",
+        promptStatus:
+          jobRunning && s.promptStatus === "loading"
+            ? "loading"
+            : s.promptStatus === "loading"
+              ? s.scenePackage || s.veoPrompt?.trim()
+                ? "done"
+                : "idle"
+              : (s.promptStatus ?? "idle"),
+        error:
+          !jobRunning && s.analyzeStatus === "loading" && !s.analysis?.trim()
+            ? s.error || "Analyze interrupted — click Analyze to retry."
+            : s.error,
         usageAnalyze: s.usageAnalyze,
         usagePrompt: s.usagePrompt,
         error: s.error,
@@ -283,13 +302,54 @@ function updateAnalyzeButton() {
   const left = scenesLeftToAnalyze();
   if (state.analyzeJobRunning) {
     btn.textContent = `Analyzing… (${done}/${state.scenes.length})`;
+    btn.disabled = true;
+  } else if (state.visionLockBlocked) {
+    btn.textContent = "Wait — another user is analyzing";
+    btn.disabled = true;
   } else if (left === 0) {
     btn.textContent = "All scenes analyzed";
+    btn.disabled = true;
   } else if (done > 0) {
     btn.textContent = `Continue analyze (${left} left)`;
+    btn.disabled = false;
   } else {
     btn.textContent = "Analyze all scenes";
+    btn.disabled = false;
   }
+}
+
+async function refreshVisionLockStatus() {
+  const status = await fetchVisionLockStatus();
+  state.visionLockBlocked = status.locked ? status : null;
+  renderVisionLockBanner();
+  updateAnalyzeButton();
+}
+
+function renderVisionLockBanner() {
+  const el = $("#visionLockBanner");
+  if (!el) return;
+  if (state.step !== 3 || !state.visionLockBlocked) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.textContent = visionLockWaitMessage(state.visionLockBlocked);
+}
+
+function startVisionLockPolling() {
+  if (visionLockPollTimer) return;
+  void refreshVisionLockStatus();
+  visionLockPollTimer = setInterval(() => void refreshVisionLockStatus(), 4000);
+}
+
+function stopVisionLockPolling() {
+  if (visionLockPollTimer) {
+    clearInterval(visionLockPollTimer);
+    visionLockPollTimer = null;
+  }
+  state.visionLockBlocked = null;
+  renderVisionLockBanner();
 }
 
 async function syncMetaFromStorage() {
@@ -304,6 +364,12 @@ async function syncMetaFromStorage() {
     if (!ss) continue;
     ss.analysis = ms.analysis;
     ss.analyzeStatus = ms.analyzeStatus ?? ss.analyzeStatus;
+    ss.scenePackage = ms.scenePackage ?? ss.scenePackage;
+    ss.veoPrompt = ms.veoPrompt ?? ss.veoPrompt;
+    ss.negativePrompt = ms.negativePrompt ?? ss.negativePrompt;
+    ss.parseError = ms.parseError ?? ss.parseError;
+    ss.rawPackageText = ms.rawPackageText ?? ss.rawPackageText;
+    ss.promptStatus = ms.promptStatus ?? ss.promptStatus;
     ss.usageAnalyze = ms.usageAnalyze ?? ss.usageAnalyze;
     ss.usagePrompt = ms.usagePrompt ?? ss.usagePrompt;
     ss.error = ms.error;
@@ -412,6 +478,10 @@ async function loadProjectFromDb(dbId) {
       scenePackage: s.scenePackage,
       veoPrompt: s.veoPrompt,
       negativePrompt: s.negativePrompt,
+      parseError: s.parseError,
+      rawPackageText: s.rawPackageText,
+      debutUrl: s.debutUrl,
+      finUrl: s.finUrl,
       analyzeStatus: s.analyzeStatus ?? "idle",
       promptStatus: s.promptStatus ?? "idle",
       usageAnalyze: s.usageAnalyze,
@@ -570,6 +640,46 @@ function renderStepNav() {
   renderPipelineBoard();
 }
 
+function updatePipelineModeUi() {
+  document.querySelectorAll('input[name="pipelineMode"]').forEach((el) => {
+    el.checked = (el.value === "auto") === state.autoPipeline;
+  });
+  const btn = $("#btnExtract");
+  const hint = $("#extractHint");
+  const confirmBtn = $("#btnConfirmScenes");
+  if (state.autoPipeline) {
+    if (btn) btn.textContent = "Start full pipeline";
+    if (hint) {
+      hint.textContent =
+        "Runs extract → analyze → Veo prompts automatically. Safe to close the sidebar while analyze runs.";
+    }
+    if (confirmBtn) confirmBtn.textContent = "Confirm scenes → Analyze";
+  } else {
+    if (btn) btn.textContent = "Extract frames →";
+    if (hint) {
+      hint.textContent =
+        "Step by step: extract frames, adjust scene boundaries, then run Analyze and Generate yourself.";
+    }
+    if (confirmBtn) confirmBtn.textContent = "Confirm scenes → Continue";
+  }
+  renderPipelineBoard();
+}
+
+async function setPipelineMode(auto) {
+  state.autoPipeline = auto;
+  await setFlowSettings({ autoPipeline: auto });
+  updatePipelineModeUi();
+}
+
+function bindPipelineModeRadios() {
+  document.querySelectorAll('input[name="pipelineMode"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      if (!el.checked) return;
+      void setPipelineMode(el.value === "auto");
+    });
+  });
+}
+
 function pipelineStepStatus(key) {
   const total = state.scenes.length;
   const analyzed = state.scenes.filter((s) => s.analyzeStatus === "done").length;
@@ -662,8 +772,8 @@ function renderPipelineBoard() {
     </div>
     ${
       state.autoPipeline
-        ? `<p class="hint pipeline-hint">Auto pipeline ON — wait until all Veo prompts show <strong>done</strong> below.</p>`
-        : `<p class="hint pipeline-hint">Manual mode — run Analyze and Generate prompts yourself.</p>`
+        ? `<p class="hint pipeline-hint">Full pipeline — wait until all Veo prompts show <strong>done</strong> below.</p>`
+        : `<p class="hint pipeline-hint">Step by step — run <strong>Analyze</strong> then <strong>Generate Veo prompts</strong> when you are ready.</p>`
     }`;
 }
 
@@ -798,6 +908,8 @@ function goStep(n, opts = {}) {
     $(`#clone-step-${i}`).classList.toggle("hidden", i !== n);
   }
   renderStepNav();
+  if (n === 3) startVisionLockPolling();
+  else stopVisionLockPolling();
   if (!opts.skipPersist) schedulePersist();
 }
 
@@ -821,7 +933,7 @@ function renderFrames() {
   $("#scenePairList").innerHTML = pairs
     .map(
       (p) =>
-        `<li><strong>Scene ${p.sceneNumber}</strong> — #${p.debut.index + 1} (${p.debut.timeSec.toFixed(2)}s) → #${p.fin.index + 1} (${p.fin.timeSec.toFixed(2)}s)</li>`
+        `<li><strong>Scene ${p.sceneNumber}</strong> — #${p.debut.index + 1} (${p.debut.timeSec.toFixed(2)}s) → #${p.fin.index + 1} (${p.fin.timeSec.toFixed(2)}s) · ${p.sceneFrames.length} frames</li>`
     )
     .join("");
 }
@@ -837,6 +949,25 @@ function toggleBoundary(index) {
   schedulePersist();
 }
 
+function applyPromptApiResult(scene, data) {
+  if (data.scenePackage) {
+    scene.scenePackage = data.scenePackage;
+    scene.veoPrompt = data.scenePackage.veoPrompt || "";
+    scene.negativePrompt = data.scenePackage.negativePrompt || "";
+    scene.parseError = undefined;
+    scene.rawPackageText = undefined;
+    scene.promptStatus = "done";
+    scene.error = undefined;
+    return;
+  }
+  scene.scenePackage = undefined;
+  scene.veoPrompt = "";
+  scene.negativePrompt = "";
+  scene.parseError = data.parseError || "JSON parse failed";
+  scene.rawPackageText = data.rawPackageText || "";
+  scene.promptStatus = "error";
+}
+
 function sceneCardHtml(s, large = false) {
   const analyzeBadge = s.analyzeStatus
     ? `<span class="badge ${s.analyzeStatus}">${s.analyzeStatus}</span>`
@@ -845,6 +976,10 @@ function sceneCardHtml(s, large = false) {
     ? `<span class="badge ${s.promptStatus}">${s.promptStatus}</span>`
     : "";
   const imgClass = large ? "large" : "";
+  const analyzeLabel =
+    s.analyzeStatus === "done" && s.analysis?.trim() ? "Re-analyze" : "Analyze";
+  const promptLabel =
+    s.promptStatus === "done" && s.scenePackage ? "Regenerate" : "Generate prompt";
   return `
     <article class="scene-card" data-scene="${s.sceneNumber}">
       <h3>Scene ${s.sceneNumber} ${analyzeBadge} ${promptBadge} ${usageChipHtml(s.usageAnalyze)} ${usageChipHtml(s.usagePrompt)}</h3>
@@ -870,6 +1005,11 @@ function sceneCardHtml(s, large = false) {
           : ""
       }
       ${
+        s.parseError
+          ? `<details class="detail-block"><summary>JSON parse error</summary><pre>${escapeHtml(s.parseError)}</pre>${s.rawPackageText ? `<pre>${escapeHtml(s.rawPackageText)}</pre>` : ""}</details>`
+          : ""
+      }
+      ${
         s.veoPrompt
           ? `<details class="detail-block"><summary>veoPrompt only (${s.veoPrompt.trim().split(/\s+/).length} words)</summary><textarea readonly>${escapeHtml(s.veoPrompt)}</textarea></details>`
           : ""
@@ -879,7 +1019,9 @@ function sceneCardHtml(s, large = false) {
           ? `<details class="detail-block"><summary>Negative prompt</summary><pre>${escapeHtml(s.negativePrompt)}</pre></details>`
           : ""
       }
-      <div class="actions">
+      <div class="actions scene-scene-actions">
+        <button type="button" class="btn secondary sm btn-analyze-scene" data-scene="${s.sceneNumber}">${analyzeLabel}</button>
+        <button type="button" class="btn secondary sm btn-prompt-scene" data-scene="${s.sceneNumber}" ${s.analysis?.trim() ? "" : "disabled"}>${promptLabel}</button>
         <button type="button" class="btn secondary btn-fill-flow" data-scene="${s.sceneNumber}">→ Google Flow</button>
         <button type="button" class="btn ghost btn-copy-prompt" data-scene="${s.sceneNumber}">Copy JSON</button>
       </div>
@@ -900,6 +1042,12 @@ function renderScenes() {
 }
 
 function bindSceneActions() {
+  document.querySelectorAll(".btn-analyze-scene").forEach((btn) => {
+    btn.onclick = () => void analyzeOneScene(Number(btn.dataset.scene));
+  });
+  document.querySelectorAll(".btn-prompt-scene").forEach((btn) => {
+    btn.onclick = () => void generateOnePrompt(Number(btn.dataset.scene));
+  });
   document.querySelectorAll(".btn-fill-flow").forEach((btn) => {
     btn.onclick = () => {
       const sn = Number(btn.dataset.scene);
@@ -953,6 +1101,12 @@ async function onExtract() {
     state.sceneCount = sc;
     state.boundaryIndices = autoSceneBoundaries(result.frames.length, sc);
     renderFrames();
+    if (!state.autoPipeline) {
+      goStep(2);
+      showStatus(`${result.frames.length} frames extracted — adjust boundaries, then confirm scenes.`);
+      schedulePersist();
+      return;
+    }
     if (!buildScenesFromBoundaries()) {
       goStep(2);
       showStatus(`${result.frames.length} frames extracted — set scene boundaries.`);
@@ -992,7 +1146,11 @@ function onConfirmScenes() {
   renderScenes();
   goStep(3);
   schedulePersist();
-  void onAnalyzeAll();
+  if (state.autoPipeline) {
+    void onAnalyzeAll();
+  } else {
+    showStatus("Scenes confirmed — tap Analyze all scenes when ready.");
+  }
 }
 
 async function onAnalyzeAll() {
@@ -1000,6 +1158,14 @@ async function onAnalyzeAll() {
   if (!left) {
     showStatus("All scenes already analyzed.");
     goStep(4);
+    return;
+  }
+  const lock = await fetchVisionLockStatus();
+  if (lock.locked) {
+    state.visionLockBlocked = lock;
+    renderVisionLockBanner();
+    updateAnalyzeButton();
+    showStatus(visionLockWaitMessage(lock), "error");
     return;
   }
   if (!state.projectId) state.projectId = crypto.randomUUID();
@@ -1023,14 +1189,111 @@ async function onAnalyzeAll() {
     showStatus(res?.error || "Failed to start analyze", "error");
     return;
   }
-  showStatus("Analyze running in parallel — safe to close the sidebar.");
+  showStatus("Analyze running (1 scene at a time) — safe to close the sidebar.");
   startAnalyzePolling();
 }
 
+async function analyzeOneScene(sceneNumber) {
+  if (state.analyzeJobRunning) {
+    showStatus("Wait for bulk analyze to finish.", "error");
+    return;
+  }
+  const lock = await fetchVisionLockStatus();
+  if (lock.locked) {
+    state.visionLockBlocked = lock;
+    renderVisionLockBanner();
+    updateAnalyzeButton();
+    showStatus(visionLockWaitMessage(lock), "error");
+    return;
+  }
+  const s = state.scenes.find((x) => x.sceneNumber === sceneNumber);
+  if (!s) return;
+  s.analyzeStatus = "loading";
+  s.error = undefined;
+  renderScenes();
+  try {
+    await waitBeforeNextAnalyze();
+    const payload = await buildCloneAnalyzeRequest(s, state.frames);
+    const json = await postAiJson(
+      "/api/ai/veo-scene-analyze",
+      {
+        ...payload,
+        lockHint: `Scene ${sceneNumber}/${state.scenes.length}`,
+      },
+      180_000,
+      await getApiBase()
+    );
+    s.analysis = typeof json.analysis === "string" ? json.analysis.trim() : "";
+    s.analyzeStatus = "done";
+    s.debutUrl = payload.debutImageUrl?.startsWith("https://") ? payload.debutImageUrl : s.debutUrl;
+    s.finUrl = payload.finImageUrl?.startsWith("https://") ? payload.finImageUrl : s.finUrl;
+    await recordUsageFromResponse(json, `Clone analyze · scene ${sceneNumber}`, s, "usageAnalyze");
+    showStatus(`Scene ${sceneNumber} analyzed.`);
+  } catch (e) {
+    s.analyzeStatus = "error";
+    s.error = e instanceof Error ? e.message : String(e);
+    showStatus(s.error, "error");
+  } finally {
+    markAnalyzeFinished();
+    await releaseVisionAnalyzeLock();
+    renderScenes();
+    updateAnalyzeButton();
+    await persistAll();
+  }
+}
+
+async function generateOnePrompt(sceneNumber) {
+  const s = state.scenes.find((x) => x.sceneNumber === sceneNumber);
+  if (!s?.analysis?.trim()) {
+    showStatus("Analyze scene first.", "error");
+    return;
+  }
+  if (state.isGeneratingPrompts) {
+    showStatus("Wait for bulk prompt generation to finish.", "error");
+    return;
+  }
+  s.promptStatus = "loading";
+  s.error = undefined;
+  renderScenes();
+  const fullScript = buildCloneFullScript(state.scenes, state.duration);
+  try {
+    const data = await postAiJson("/api/ai/veo-scene-package", {
+      fullScript,
+      sceneNumber: s.sceneNumber,
+      imageAnalysis: s.analysis,
+      languageLabel: CLONE_LANGUAGE_LABEL,
+      workflowMode: "clone",
+    });
+    applyPromptApiResult(s, data);
+    if (data.scenePackage) {
+      await recordUsageFromResponse(
+        data,
+        `Clone Veo prompt · scene ${sceneNumber}`,
+        s,
+        "usagePrompt"
+      );
+      showStatus(`Scene ${sceneNumber} prompt saved (full JSON).`);
+    } else {
+      showStatus(`Scene ${sceneNumber}: JSON parse failed.`, "error");
+    }
+  } catch (e) {
+    s.promptStatus = "error";
+    s.error = e instanceof Error ? e.message : String(e);
+    showStatus(s.error, "error");
+  }
+  renderScenes();
+  renderPipelineBoard();
+  await persistAll();
+}
+
 async function onGeneratePrompts() {
-  const pending = state.scenes.filter((s) => s.analysis?.trim());
+  const pending = state.scenes.filter(
+    (s) =>
+      s.analysis?.trim() &&
+      (s.promptStatus !== "done" || !s.veoPrompt?.trim() || !s.scenePackage)
+  );
   if (!pending.length) {
-    showStatus("Analyze scenes first.", "error");
+    showStatus("All scenes have prompts — use Regenerate on a scene card.", "error");
     return;
   }
 
@@ -1041,7 +1304,7 @@ async function onGeneratePrompts() {
   const progress = $("#generateProgress");
   if (progress) {
     progress.classList.remove("hidden");
-    progress.textContent = `Generating ${pending.length} scene(s) (${CLONE_AI_CONCURRENCY} at a time)…`;
+    progress.textContent = `Generating ${pending.length} pending scene(s)…`;
   }
 
   for (const s of pending) {
@@ -1057,23 +1320,17 @@ async function onGeneratePrompts() {
         fullScript,
         sceneNumber: s.sceneNumber,
         imageAnalysis: s.analysis,
-        languageLabel: "Moroccan Darija",
+        languageLabel: CLONE_LANGUAGE_LABEL,
         workflowMode: "clone",
       });
+      applyPromptApiResult(s, data);
       if (data.scenePackage) {
-        s.scenePackage = data.scenePackage;
-        s.veoPrompt = data.scenePackage.veoPrompt || "";
-        s.negativePrompt = data.scenePackage.negativePrompt || "";
-        s.promptStatus = "done";
         await recordUsageFromResponse(
           data,
           `Clone Veo prompt · scene ${s.sceneNumber}`,
           s,
           "usagePrompt"
         );
-      } else {
-        s.promptStatus = "error";
-        s.error = data.parseError || "JSON parse failed";
       }
     } catch (e) {
       s.promptStatus = "error";
@@ -1082,10 +1339,11 @@ async function onGeneratePrompts() {
       done += 1;
       if (progress) progress.textContent = `Prompts ${done} / ${pending.length} done…`;
       renderScenes();
+      await persistAll();
     }
   });
 
-  await runWithConcurrency(promptTasks, CLONE_AI_CONCURRENCY);
+  await runWithConcurrency(promptTasks, CLONE_AI_CONCURRENCY, { minDelayMs: CLONE_AI_MIN_DELAY_MS });
 
   if (progress) progress.classList.add("hidden");
   state.isGeneratingPrompts = false;
@@ -1910,11 +2168,7 @@ function bindUi() {
     e.target.value = String(state.sceneCount);
   });
 
-  $("#autoPipeline")?.addEventListener("change", async (e) => {
-    state.autoPipeline = e.target.checked;
-    await setFlowSettings({ autoPipeline: state.autoPipeline });
-    renderPipelineBoard();
-  });
+  bindPipelineModeRadios();
 
   $("#btnExtract").addEventListener("click", () => void onExtract());
   $("#btnAutoBoundaries").addEventListener("click", () => {
@@ -1977,7 +2231,7 @@ function bindUi() {
     }
     await setFlowSettings({
       autoRun: $("#flowAutoRun").checked,
-      autoPipeline: $("#autoPipeline")?.checked !== false,
+      autoPipeline: state.autoPipeline,
       aspectRatio: $("#flowAspect").value,
       model: $("#flowModel").value,
       duration: $("#flowDuration").value,
@@ -2075,8 +2329,7 @@ async function loadSettings() {
   $("#flowOutputs").value = flow.outputs ?? "1";
   $("#flowVideoMode").value = flow.videoMode ?? "Frames to Video";
   state.autoPipeline = flow.autoPipeline !== false;
-  const autoEl = $("#autoPipeline");
-  if (autoEl) autoEl.checked = state.autoPipeline;
+  updatePipelineModeUi();
   await renderFlowSettingsSummary();
 }
 

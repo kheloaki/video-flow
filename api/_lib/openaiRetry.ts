@@ -12,7 +12,7 @@ export function parseOpenAiRetryMs(message: string): number | null {
 export async function fetchOpenAiChat(
   apiKey: string,
   payload: Record<string, unknown>,
-  maxRetries = 4
+  maxRetries = 8
 ): Promise<{ ok: boolean; status: number; text: string }> {
   const body = JSON.stringify(payload);
   const url = "https://api.openai.com/v1/chat/completions";

@@ -75,3 +75,24 @@ export async function prepareVisionImageUrl(
 
   return compressed;
 }
+
+/** Compress every frame in a scene; splits payload budget across all images. */
+export async function prepareSceneFrameImageUrls(
+  dataUrls: string[],
+  sceneNumber: number,
+  totalPayloadBudget = 3_500_000
+): Promise<string[]> {
+  const n = Math.max(1, dataUrls.length);
+  const perImage = Math.min(900_000, Math.floor(totalPayloadBudget / n));
+  const out: string[] = [];
+  for (let i = 0; i < dataUrls.length; i++) {
+    out.push(
+      await prepareVisionImageUrl(
+        dataUrls[i],
+        `scene-${sceneNumber}-frame-${String(i + 1).padStart(2, "0")}.jpg`,
+        perImage
+      )
+    );
+  }
+  return out;
+}

@@ -3,9 +3,14 @@ export type CloneSceneScriptInput = {
   debut: { index: number; timeSec: number };
   fin: { index: number; timeSec: number };
   analysis?: string;
+  /** Total reference frames in this scene (debut → fin inclusive). */
+  frameCount?: number;
 };
 
 export const CLONE_VEO_SCENE_SECONDS = 8;
+
+/** Clone Veo packages: ambient/source audio only — no scripted dialogue. */
+export const CLONE_LANGUAGE_LABEL = "ambient source audio only (no spoken dialogue)";
 
 export function buildCloneDebutFinPrompts(scene: CloneSceneScriptInput): {
   debutPrompt: string;
@@ -13,16 +18,21 @@ export function buildCloneDebutFinPrompts(scene: CloneSceneScriptInput): {
 } {
   const sn = scene.sceneNumber;
   const refDelta = Math.max(0, scene.fin.timeSec - scene.debut.timeSec);
+  const frameCount = scene.frameCount ?? 2;
+  const frameRange =
+    frameCount > 2
+      ? ` Scene spans ${frameCount} reference frames (#${scene.debut.index + 1} debut → #${scene.fin.index + 1} fin). Describe EVERY intermediate frame — not only endpoints.`
+      : "";
   const analysisBit = scene.analysis?.trim()
     ? `\nVision notes: ${scene.analysis.trim().slice(0, 1200)}`
     : "";
   return {
-    debutPrompt: `CLONE SCENE ${sn} — START (debut) still. Frame #${scene.debut.index + 1} at ${scene.debut.timeSec.toFixed(2)}s (${refDelta.toFixed(2)}s before fin in reference). Describe everything visible; diff vs fin.${analysisBit}`,
-    finPrompt: `CLONE SCENE ${sn} — END (fin) still. Frame #${scene.fin.index + 1} at ${scene.fin.timeSec.toFixed(2)}s. List every change vs debut; schedule each change in its own timed beat across ${CLONE_VEO_SCENE_SECONDS}s (not all at once).${analysisBit}`,
+    debutPrompt: `CLONE SCENE ${sn} — START (debut) still. Frame #${scene.debut.index + 1} at ${scene.debut.timeSec.toFixed(2)}s (${refDelta.toFixed(2)}s before fin in reference).${frameRange} Exhaustive visual snapshot; diff vs every later frame.${analysisBit}`,
+    finPrompt: `CLONE SCENE ${sn} — END (fin) still. Frame #${scene.fin.index + 1} at ${scene.fin.timeSec.toFixed(2)}s.${frameRange} List every change vs debut and each intermediate frame; schedule each change in its own timed beat across ${CLONE_VEO_SCENE_SECONDS}s.${analysisBit}`,
   };
 }
 
-/** Rich fullScript matching Video Flow density (script + SCENE METADATA JSON). */
+/** Rich fullScript for clone Veo package generation (English, ambient audio only). */
 export function buildCloneFullScript(
   scenes: CloneSceneScriptInput[],
   videoDurationSec: number
@@ -39,6 +49,8 @@ export function buildCloneFullScript(
       timecode: `${startSec}–${endSec}s`,
       reference_debut_sec: s.debut.timeSec,
       reference_fin_sec: s.fin.timeSec,
+      reference_frame_count: s.frameCount ?? 2,
+      audio: "ambient source audio only — environmental sounds from reference (tools, machinery, room tone, impacts). No spoken dialogue or voiceover script unless reference clearly shows on-camera speech.",
       debut: {
         prompt: debutPrompt,
         use_model_ref: true,
@@ -60,26 +72,30 @@ export function buildCloneFullScript(
       const startSec = (s.sceneNumber - 1) * CLONE_VEO_SCENE_SECONDS;
       const endSec = s.sceneNumber * CLONE_VEO_SCENE_SECONDS;
       const refDelta = Math.max(0, s.fin.timeSec - s.debut.timeSec);
-      return `**المشهد ${s.sceneNumber} (Scene ${s.sceneNumber}) - من ${startSec} إلى ${endSec} ثانية**
-[شنو تبيني فالفيديو]: Ultra-realistic vertical clone. Recreate reference motion from still A (t=${s.debut.timeSec.toFixed(2)}s) to still B (t=${s.fin.timeSec.toFixed(2)}s, ${refDelta.toFixed(1)}s apart in source). Follow TIMED ACTION SPLIT from vision analysis — stagger each change across ${CLONE_VEO_SCENE_SECONDS}s, never all at once.
-[النص الصوتي - Voice Script]: (infer only if reference clearly shows speaking; otherwise silent/natural ambience)
+      const frames = s.frameCount ?? 2;
+      return `**Scene ${s.sceneNumber} — ${startSec}s to ${endSec}s (Veo output)**
+Reference span: still A at t=${s.debut.timeSec.toFixed(2)}s → still B at t=${s.fin.timeSec.toFixed(2)}s (${refDelta.toFixed(1)}s in source, ${frames} reference frames analyzed).
+Visual goal: Recreate reference motion using TIMED ACTION SPLIT from vision analysis — every frame-to-frame change gets its own beat across ${CLONE_VEO_SCENE_SECONDS}s.
+Audio goal: Ambient / environmental sound from the reference clip only (machinery, footsteps, wind, impacts, room tone). NO scripted voiceover, NO Darija/Arabic/French dialogue unless reference clearly shows on-camera speech.
 ---
-Vision continuity (debut → fin):
+Vision continuity (all frames debut → fin):
 ${s.analysis?.trim() || "(see image analysis for this scene)"}`;
     })
     .join("\n\n");
 
-  return `📝 CLONE VIDEO — Reference reproduction (Moroccan UGC TikTok / Reels)
-المنتج: Reference video clone (same talent, room, product if visible)
-المدة المتوقعة: ${total * CLONE_VEO_SCENE_SECONDS} ثانية (${total} مشهد، كل مشهد ${CLONE_VEO_SCENE_SECONDS} ثواني)
-Platform: TikTok / Instagram Reels
-Format: vertical 9:16
+  return `CLONE VIDEO — Reference reproduction (visual + ambient sound)
+Product: Reference video clone (preserve talent, environment, props as in reference)
+Output duration: ${total * CLONE_VEO_SCENE_SECONDS}s (${total} scenes × ${CLONE_VEO_SCENE_SECONDS}s each)
+Platform: vertical 9:16
 Generation model: Google Veo 3.1
 Source reference duration: ~${videoDurationSec.toFixed(1)}s
-Total clone scenes: ${total}
+Language / audio: ${CLONE_LANGUAGE_LABEL}
 
-🎬 السكريبت الصوتي والتعليمات البصرية (clone reference):
-CRITICAL: Each scene is EXACTLY ${CLONE_VEO_SCENE_SECONDS} seconds. Follow TIMED ACTION SPLIT from vision analysis — each change gets its own beat; motion must interpolate debut → fin without dumping all changes at once.
+CRITICAL:
+- Each scene is EXACTLY ${CLONE_VEO_SCENE_SECONDS} seconds of generated video.
+- Vision analysis covers ALL reference frames between debut and fin — use the full PROGRESSION, not only endpoints.
+- Follow TIMED ACTION SPLIT beat-by-beat; never dump all changes in one instant.
+- Do NOT invent marketing narration or Darija voiceover.
 
 ${narrative}
 

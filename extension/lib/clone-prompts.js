@@ -1,14 +1,21 @@
 export const CLONE_VEO_SCENE_SECONDS = 8;
 
+export const CLONE_LANGUAGE_LABEL = "ambient source audio only (no spoken dialogue)";
+
 export function buildCloneDebutFinPrompts(scene) {
   const sn = scene.sceneNumber;
   const refDelta = Math.max(0, scene.fin.timeSec - scene.debut.timeSec);
+  const frameCount = scene.frameCount ?? 2;
+  const frameRange =
+    frameCount > 2
+      ? ` Scene spans ${frameCount} reference frames (#${scene.debut.index + 1} debut → #${scene.fin.index + 1} fin). Describe EVERY intermediate frame — not only endpoints.`
+      : "";
   const analysisBit = scene.analysis?.trim()
     ? `\nVision notes: ${scene.analysis.trim().slice(0, 1200)}`
     : "";
   return {
-    debutPrompt: `CLONE SCENE ${sn} — START (debut) still. Frame #${scene.debut.index + 1} at ${scene.debut.timeSec.toFixed(2)}s (${refDelta.toFixed(2)}s before fin in reference). Describe everything visible; diff vs fin.${analysisBit}`,
-    finPrompt: `CLONE SCENE ${sn} — END (fin) still. Frame #${scene.fin.index + 1} at ${scene.fin.timeSec.toFixed(2)}s. List every change vs debut; schedule each change in its own timed beat across ${CLONE_VEO_SCENE_SECONDS}s (not all at once).${analysisBit}`,
+    debutPrompt: `CLONE SCENE ${sn} — START (debut) still. Frame #${scene.debut.index + 1} at ${scene.debut.timeSec.toFixed(2)}s (${refDelta.toFixed(2)}s before fin).${frameRange} Exhaustive visual snapshot.${analysisBit}`,
+    finPrompt: `CLONE SCENE ${sn} — END (fin) still. Frame #${scene.fin.index + 1} at ${scene.fin.timeSec.toFixed(2)}s.${frameRange} List every change vs debut and each intermediate frame.${analysisBit}`,
   };
 }
 
@@ -25,6 +32,8 @@ export function buildCloneFullScript(scenes, videoDurationSec) {
       timecode: `${startSec}–${endSec}s`,
       reference_debut_sec: s.debut.timeSec,
       reference_fin_sec: s.fin.timeSec,
+      reference_frame_count: s.frameCount ?? 2,
+      audio: "ambient source audio only — no spoken dialogue unless reference shows on-camera speech",
       debut: { prompt: debutPrompt, use_model_ref: true, use_product_ref: true, use_background_ref: true },
       fin: { prompt: finPrompt, use_model_ref: true, use_product_ref: true, use_background_ref: true },
       vision_analysis: s.analysis ?? "",
@@ -36,8 +45,9 @@ export function buildCloneFullScript(scenes, videoDurationSec) {
       const startSec = (s.sceneNumber - 1) * CLONE_VEO_SCENE_SECONDS;
       const endSec = s.sceneNumber * CLONE_VEO_SCENE_SECONDS;
       const refDelta = Math.max(0, s.fin.timeSec - s.debut.timeSec);
-      return `**Scene ${s.sceneNumber} — ${startSec} to ${endSec}s**
-Recreate reference motion from still A (t=${s.debut.timeSec.toFixed(2)}s) to still B (t=${s.fin.timeSec.toFixed(2)}s, ${refDelta.toFixed(1)}s apart). TIMED ACTION SPLIT across ${CLONE_VEO_SCENE_SECONDS}s.
+      const frames = s.frameCount ?? 2;
+      return `**Scene ${s.sceneNumber} — ${startSec}s to ${endSec}s**
+Reference: t=${s.debut.timeSec.toFixed(2)}s → t=${s.fin.timeSec.toFixed(2)}s (${refDelta.toFixed(1)}s source, ${frames} frames). Ambient audio only — no Darija/voiceover script.
 ---
 ${s.analysis?.trim() || "(see image analysis)"}`;
     })
@@ -46,6 +56,9 @@ ${s.analysis?.trim() || "(see image analysis)"}`;
   return `CLONE VIDEO — Reference reproduction
 Duration: ${total * CLONE_VEO_SCENE_SECONDS}s (${total} scenes × ${CLONE_VEO_SCENE_SECONDS}s)
 Source reference: ~${videoDurationSec.toFixed(1)}s
+Language / audio: ${CLONE_LANGUAGE_LABEL}
+
+Use ALL reference frames from vision analysis (full progression debut → fin).
 
 ${narrative}
 

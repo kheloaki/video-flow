@@ -1,9 +1,9 @@
 import { loadFrames } from "./frame-store.js";
-import { buildCloneDebutFinPrompts, CLONE_VEO_SCENE_SECONDS } from "./clone-prompts.js";
+import { buildCloneAnalyzeRequest, sceneWithFramesFromMeta } from "./clone-analyze.js";
 import { postAiJson, getApiBase } from "./api.js";
-import { prepareVisionImageUrl } from "./images.js";
 import { isAiUsagePayload, insertUsageLog } from "./usage-db.js";
-import { CLONE_AI_CONCURRENCY, runWithConcurrency } from "./concurrency.js";
+import { CLONE_AI_CONCURRENCY, CLONE_ANALYZE_DELAY_MS, markAnalyzeFinished, runWithConcurrency, waitBeforeNextAnalyze } from "./concurrency.js";
+import { releaseVisionAnalyzeLock } from "./vision-lock.js";
 
 const DRAFT_META_KEY = "vf_draft_meta";
 const ACTIVE_PROJECT_KEY = "vf_active_project_id";
@@ -29,19 +29,6 @@ async function loadMeta(projectId) {
   return stored[DRAFT_META_KEY];
 }
 
-function sceneFromMeta(s, frameByIndex) {
-  const debut = frameByIndex.get(s.debutIndex);
-  const fin = frameByIndex.get(s.finIndex);
-  if (!debut?.dataUrl || !fin?.dataUrl) {
-    throw new Error(`Scene ${s.sceneNumber}: frames missing — reopen popup w extract.`);
-  }
-  return {
-    sceneNumber: s.sceneNumber,
-    debut: { index: s.debutIndex, timeSec: s.debutTimeSec, dataUrl: debut.dataUrl },
-    fin: { index: s.finIndex, timeSec: s.finTimeSec, dataUrl: fin.dataUrl },
-  };
-}
-
 async function setAnalyzeProgress(projectId, patch) {
   const current = await getAnalyzeJobStatus();
   await chrome.storage.local.set({
@@ -54,29 +41,23 @@ async function setAnalyzeProgress(projectId, patch) {
   });
 }
 
-async function analyzeSceneAtIndex(meta, index, frameByIndex, apiBase, projectId) {
+async function analyzeSceneAtIndex(meta, index, frameByIndex, allFrames, apiBase, projectId) {
   const job = await getAnalyzeJobStatus();
   if (!job.running) return;
 
   try {
-    const s = sceneFromMeta(meta.scenes[index], frameByIndex);
-    const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts(s);
-    const [debutImageUrl, finImageUrl] = await Promise.all([
-      prepareVisionImageUrl(s.debut.dataUrl),
-      prepareVisionImageUrl(s.fin.dataUrl),
-    ]);
+    await waitBeforeNextAnalyze();
+    const { scene, allFrames: framesList } = sceneWithFramesFromMeta(
+      meta.scenes[index],
+      frameByIndex,
+      allFrames
+    );
+    const payload = await buildCloneAnalyzeRequest(scene, framesList);
     const json = await postAiJson(
       "/api/ai/veo-scene-analyze",
       {
-        debutImageUrl,
-        finImageUrl,
-        debutPrompt,
-        finPrompt,
-        workflowMode: "clone",
-        sceneNumber: s.sceneNumber,
-        referenceDebutSec: s.debut.timeSec,
-        referenceFinSec: s.fin.timeSec,
-        veoOutputDurationSec: CLONE_VEO_SCENE_SECONDS,
+        ...payload,
+        lockHint: `Scene ${scene.sceneNumber}/${meta.scenes.length}`,
       },
       180_000,
       apiBase
@@ -86,11 +67,13 @@ async function analyzeSceneAtIndex(meta, index, frameByIndex, apiBase, projectId
       analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
       analyzeStatus: "done",
       error: undefined,
+      debutUrl: payload.debutImageUrl?.startsWith("https://") ? payload.debutImageUrl : meta.scenes[index].debutUrl,
+      finUrl: payload.finImageUrl?.startsWith("https://") ? payload.finImageUrl : meta.scenes[index].finUrl,
       usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : meta.scenes[index].usageAnalyze,
     };
     if (isAiUsagePayload(json.usage)) {
       try {
-        await insertUsageLog(json.usage, `Clone analyze · scene ${s.sceneNumber}`, {
+        await insertUsageLog(json.usage, `Clone analyze · scene ${scene.sceneNumber}`, {
           projectType: "clone_extension",
           projectId: meta.dbProjectId ?? projectId,
         });
@@ -105,6 +88,7 @@ async function analyzeSceneAtIndex(meta, index, frameByIndex, apiBase, projectId
       error: e instanceof Error ? e.message : String(e),
     };
   }
+  markAnalyzeFinished();
 }
 
 /** Runs in background — all pending scenes analyze in parallel (survives popup close). */
@@ -130,6 +114,7 @@ export async function runAnalyzeJob(projectId) {
     meta = await loadMeta(projectId);
     const frameRows = await loadFrames(projectId);
     const frameByIndex = new Map(frameRows.map((r) => [r.index, r]));
+    const allFrames = frameRows.slice().sort((a, b) => a.index - b.index);
 
     if (!meta.scenes?.length) throw new Error("No scenes f analyze.");
 
@@ -147,7 +132,7 @@ export async function runAnalyzeJob(projectId) {
     let completed = 0;
 
     const tasks = pending.map(({ index }) => async () => {
-      await analyzeSceneAtIndex(meta, index, frameByIndex, apiBase, projectId);
+      await analyzeSceneAtIndex(meta, index, frameByIndex, allFrames, apiBase, projectId);
       completed += 1;
       if (meta.scenes.every((sc) => sc.analyzeStatus === "done")) meta.step = 4;
       await lockedSave();
@@ -157,6 +142,7 @@ export async function runAnalyzeJob(projectId) {
     await runWithConcurrency(tasks, CLONE_AI_CONCURRENCY);
   } finally {
     await saveChain;
+    await releaseVisionAnalyzeLock(await getApiBase());
     await chrome.storage.local.set({
       [ANALYZE_JOB_KEY]: {
         running: false,

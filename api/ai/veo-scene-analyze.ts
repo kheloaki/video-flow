@@ -4,6 +4,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { runVeoSceneAnalyze } from "../_lib/veoScenePackage.js";
 import { checkAiUsageBudget } from "../_lib/usageBudget.js";
+import { acquireVisionLock } from "../_lib/visionLock.js";
 
 export const config = {
   api: {
@@ -40,7 +41,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const visionModel = process.env.OPENAI_VEO_VISION_MODEL?.trim();
-    const body = req.body as Parameters<typeof runVeoSceneAnalyze>[0];
+    const body = req.body as Parameters<typeof runVeoSceneAnalyze>[0] & {
+      lockHint?: string;
+    };
+
+    const lock = await acquireVisionLock(req);
+    if (lock.ok === false) {
+      return res.status(lock.status).json({ error: lock.error, visionLock: lock.lock ?? null });
+    }
 
     const result = await runVeoSceneAnalyze(body, { apiKey, visionModel });
     if (result.ok === false) {

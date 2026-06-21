@@ -71,3 +71,13 @@ export async function prepareVisionImageUrl(dataUrl, maxBytesPerImage = 900_000)
   }
   return best;
 }
+
+export async function prepareSceneFrameImageUrls(dataUrls, sceneNumber, totalPayloadBudget = 3_500_000) {
+  const n = Math.max(1, dataUrls.length);
+  const perImage = Math.min(900_000, Math.floor(totalPayloadBudget / n));
+  const out = [];
+  for (let i = 0; i < dataUrls.length; i++) {
+    out.push(await prepareVisionImageUrl(dataUrls[i], perImage));
+  }
+  return out;
+}

@@ -69,12 +69,27 @@
           </label>
         </div>
         <div id="flowSettingsSummary" class="flow-settings-summary"></div>
-        <label class="check-row">
-          <input type="checkbox" id="autoPipeline" checked />
-          <span>Auto-run full pipeline — extract → analyze → Veo prompts (wait until ready)</span>
-        </label>
-        <button type="button" id="btnExtract" class="btn primary full">Start pipeline</button>
-        <p class="hint center">Upload video, confirm settings above, then start. You can close the sidebar while analyze runs.</p>
+
+        <fieldset class="pipeline-mode-choice">
+          <legend class="label">How to run</legend>
+          <label class="mode-option">
+            <input type="radio" name="pipelineMode" value="auto" checked />
+            <span class="mode-option-body">
+              <strong>Full pipeline</strong>
+              <span class="muted">Extract → analyze → Veo prompts automatically</span>
+            </span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="pipelineMode" value="manual" />
+            <span class="mode-option-body">
+              <strong>Step by step</strong>
+              <span class="muted">Pause after each step — you click Analyze &amp; Generate</span>
+            </span>
+          </label>
+        </fieldset>
+
+        <button type="button" id="btnExtract" class="btn primary full">Start full pipeline</button>
+        <p id="extractHint" class="hint center">Upload video, pick a mode, then start. Safe to close sidebar while analyze runs.</p>
       </section>
 
       <section id="clone-step-2" class="card hidden">
@@ -91,6 +106,7 @@
 
       <section id="clone-step-3" class="card hidden">
         <h2>3 — Analyze (debut → fin)</h2>
+        <div id="visionLockBanner" class="vision-lock-banner hidden" role="alert"></div>
         <button type="button" id="btnAnalyzeAll" class="btn primary full">Analyze all scenes</button>
         <p class="muted center">Runs in background — safe to close sidebar while analyzing.</p>
         <div id="analyzeScenes" class="scene-cards"></div>

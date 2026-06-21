@@ -3,6 +3,11 @@ import express from "express";
 import { runGeminiTranscription, runOpenAIChat } from "./aiHandlers";
 import { runVeoSceneAnalyze, runVeoScenePackage } from "./api/_lib/veoScenePackage.js";
 import { checkAiUsageBudget } from "./api/_lib/usageBudget.js";
+import {
+  acquireVisionLock,
+  getVisionLockStatus,
+  releaseVisionLock,
+} from "./api/_lib/visionLock.js";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -284,6 +289,13 @@ async function startServer() {
         }
         const visionModel = process.env.OPENAI_VEO_VISION_MODEL?.trim();
         const body = req.body && typeof req.body === "object" ? req.body : {};
+        const lock = await acquireVisionLock({ headers: req.headers, body });
+        if (lock.ok === false) {
+          return sendJson(res, lock.status, {
+            error: lock.error,
+            visionLock: lock.lock ?? null,
+          });
+        }
         const result = await runVeoSceneAnalyze(body, { apiKey, visionModel });
         if (result.ok === false) {
           return sendJson(res, result.status, { error: result.error });
@@ -291,6 +303,40 @@ async function startServer() {
         return sendJson(res, 200, { analysis: result.analysis, usage: result.usage ?? null });
       } catch (e) {
         console.error("veo-scene-analyze", e);
+        sendJson(res, 500, { error: safeErrMessage(e) });
+      }
+    })
+  );
+
+  app.get(
+    "/api/ai/vision-lock",
+    wrapAsync(async (req, res) => {
+      try {
+        const status = await getVisionLockStatus({ headers: req.headers });
+        return sendJson(res, 200, status);
+      } catch (e) {
+        console.error("vision-lock GET", e);
+        sendJson(res, 500, { error: safeErrMessage(e) });
+      }
+    })
+  );
+
+  app.post(
+    "/api/ai/vision-lock",
+    express.json({ limit: "32kb" }),
+    wrapAsync(async (req, res) => {
+      try {
+        const action =
+          req.body && typeof req.body === "object" && "action" in req.body
+            ? String((req.body as { action?: string }).action)
+            : "release";
+        if (action === "release") {
+          await releaseVisionLock({ headers: req.headers, body: req.body });
+          return sendJson(res, 200, { ok: true });
+        }
+        return sendJson(res, 400, { error: "Unknown action" });
+      } catch (e) {
+        console.error("vision-lock POST", e);
         sendJson(res, 500, { error: safeErrMessage(e) });
       }
     })

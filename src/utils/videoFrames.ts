@@ -141,17 +141,64 @@ export function autoSceneBoundaries(frameCount: number, sceneCount: number): num
   return [...new Set(indices)].sort((a, b) => a - b);
 }
 
+/** Max reference frames sent per scene analyze (debut + fin + middles). Keeps API payload under ~4MB. */
+export const MAX_SCENE_ANALYZE_FRAMES = 10;
+
+/** All extracted frames from scene debut through fin (inclusive). */
+export function getSceneFrames(
+  frames: ExtractedFrame[],
+  debut: Pick<ExtractedFrame, "index">,
+  fin: Pick<ExtractedFrame, "index">
+): ExtractedFrame[] {
+  const start = Math.min(debut.index, fin.index);
+  const end = Math.max(debut.index, fin.index);
+  return frames.filter((f) => f.index >= start && f.index <= end);
+}
+
+/** Evenly subsample when a scene spans too many frames; always keeps debut and fin. */
+export function subsampleSceneFrames(
+  sceneFrames: ExtractedFrame[],
+  maxFrames = MAX_SCENE_ANALYZE_FRAMES
+): ExtractedFrame[] {
+  if (sceneFrames.length <= maxFrames) return sceneFrames;
+  if (maxFrames < 2) return [sceneFrames[0]];
+  const out: ExtractedFrame[] = [sceneFrames[0]];
+  const middle = sceneFrames.slice(1, -1);
+  const slots = maxFrames - 2;
+  for (let i = 0; i < slots; i++) {
+    const idx = Math.round(((i + 1) * (middle.length + 1)) / (slots + 1)) - 1;
+    const pick = middle[Math.max(0, Math.min(middle.length - 1, idx))];
+    if (pick && out[out.length - 1]?.index !== pick.index) out.push(pick);
+  }
+  const last = sceneFrames[sceneFrames.length - 1];
+  if (out[out.length - 1]?.index !== last.index) out.push(last);
+  return out;
+}
+
 export function scenesFromBoundaries(
   frames: ExtractedFrame[],
   boundaryIndices: number[]
-): { sceneNumber: number; debut: ExtractedFrame; fin: ExtractedFrame }[] {
+): {
+  sceneNumber: number;
+  debut: ExtractedFrame;
+  fin: ExtractedFrame;
+  sceneFrames: ExtractedFrame[];
+}[] {
   const sorted = [...new Set(boundaryIndices)].filter((i) => i >= 0 && i < frames.length).sort((a, b) => a - b);
-  const out: { sceneNumber: number; debut: ExtractedFrame; fin: ExtractedFrame }[] = [];
+  const out: {
+    sceneNumber: number;
+    debut: ExtractedFrame;
+    fin: ExtractedFrame;
+    sceneFrames: ExtractedFrame[];
+  }[] = [];
   for (let i = 0; i < sorted.length - 1; i++) {
+    const debut = frames[sorted[i]];
+    const fin = frames[sorted[i + 1]];
     out.push({
       sceneNumber: i + 1,
-      debut: frames[sorted[i]],
-      fin: frames[sorted[i + 1]],
+      debut,
+      fin,
+      sceneFrames: getSceneFrames(frames, debut, fin),
     });
   }
   return out;

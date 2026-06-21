@@ -10,15 +10,16 @@ import {
   Copy,
   Download,
   Loader2,
+  RefreshCw,
   Sparkles,
   Upload,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import JSZip from "jszip";
-import { buildCloneDebutFinPrompts, buildCloneFullScript, CLONE_VEO_SCENE_SECONDS } from "./utils/buildCloneFullScript";
+import { buildCloneFullScript, CLONE_LANGUAGE_LABEL, CLONE_VEO_SCENE_SECONDS } from "./utils/buildCloneFullScript";
 import { postAiJson } from "./utils/postAiJson";
-import { prepareVisionImageUrl } from "./utils/prepareVisionImageUrl";
+import { buildCloneAnalyzeRequest } from "./utils/cloneAnalyzePayload";
 import { isAiUsagePayload, setUsagePersistContext, type AiUsagePayload } from "./utils/aiUsage";
 import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
 import {
@@ -44,10 +45,17 @@ import {
   MAX_CLONE_SCENES,
   MIN_CLONE_SCENES,
   scenesFromBoundaries,
+  getSceneFrames,
   type ExtractedFrame,
   type FrameExtractMode,
 } from "./utils/videoFrames";
-import { CLONE_AI_CONCURRENCY, runWithConcurrency } from "./utils/runWithConcurrency";
+import {
+  fetchVisionLockStatus,
+  releaseVisionAnalyzeLock,
+  visionLockWaitMessage,
+  type VisionLockStatus,
+} from "./utils/visionLock";
+import { CLONE_AI_CONCURRENCY, CLONE_AI_MIN_DELAY_MS, CLONE_ANALYZE_DELAY_MS, markAnalyzeFinished, runWithConcurrency, waitBeforeNextAnalyze } from "./utils/runWithConcurrency";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -216,8 +224,8 @@ function ClonePipelineBoard({
         </div>
         <p className="text-[11px] text-gray-500 mt-2">
           {autoPipeline
-            ? "Auto pipeline ON — upload video, set settings, then wait until all Veo prompts are done."
-            : "Manual mode — run Analyze and Generate prompts yourself."}
+            ? "Full pipeline — upload video, set settings, then wait until all Veo prompts are done."
+            : "Step by step — run Analyze and Generate prompts when you are ready."}
         </p>
       </div>
     </div>
@@ -239,6 +247,44 @@ function frameFromMeta(meta: StoredFrameMeta, httpsUrl?: string): ExtractedFrame
     timeSec: meta.timeSec,
     dataUrl: httpsUrl?.startsWith("https://") ? httpsUrl : PLACEHOLDER_FRAME,
   };
+}
+
+function scenesForFullScript(scenes: CloneScene[], allFrames: ExtractedFrame[]) {
+  return scenes.map((s) => ({
+    sceneNumber: s.sceneNumber,
+    debut: s.debut,
+    fin: s.fin,
+    analysis: s.analysis,
+    frameCount: getSceneFrames(allFrames, s.debut, s.fin).length,
+  }));
+}
+
+function normalizeStuckSceneStatuses(scenes: CloneScene[]): CloneScene[] {
+  return scenes.map((s) => {
+    let analyzeStatus = s.analyzeStatus;
+    let promptStatus = s.promptStatus;
+    let error = s.error;
+
+    if (analyzeStatus === "loading") {
+      if (s.analysis?.trim()) {
+        analyzeStatus = "done";
+      } else {
+        analyzeStatus = "error";
+        error = error || "Analyze interrupted — click Analyze to retry.";
+      }
+    }
+
+    if (promptStatus === "loading") {
+      if (s.scenePackage || s.veoPrompt?.trim()) {
+        promptStatus = "done";
+      } else {
+        promptStatus = s.analysis?.trim() ? "idle" : "idle";
+        error = error || (s.analysis?.trim() ? "Prompt generation interrupted — click Generate to retry." : undefined);
+      }
+    }
+
+    return { ...s, analyzeStatus, promptStatus, error };
+  });
 }
 
 function restoreCloneScene(stored: StoredCloneScene, frames: ExtractedFrame[]): CloneScene {
@@ -295,7 +341,9 @@ function applyProjectData(project: CloneProject): {
 } {
   const { data } = project;
   const frames = data.frameMeta.map((m) => frameFromMeta(m));
-  const scenes = data.scenes.map((s) => restoreCloneScene(s, frames));
+  const scenes = normalizeStuckSceneStatuses(
+    data.scenes.map((s) => restoreCloneScene(s, frames))
+  );
   const step = Math.min(4, Math.max(1, project.step)) as WizardStep;
   return {
     step,
@@ -377,8 +425,20 @@ export default function CloneVideoWorkspace({
       return true;
     }
   });
+  const [visionLockBlocked, setVisionLockBlocked] = useState<VisionLockStatus | null>(null);
   const [flowSettings, setFlowSettings] = useState<FlowSettings>(loadFlowSettings);
   const toastTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    setIsAnalyzing(false);
+    setIsGenerating(false);
+    setScenes((prev) => {
+      if (!prev.some((s) => s.analyzeStatus === "loading" || s.promptStatus === "loading")) {
+        return prev;
+      }
+      return normalizeStuckSceneStatuses(prev);
+    });
+  }, []);
 
   useEffect(() => {
     setUsagePersistContext(
@@ -388,6 +448,26 @@ export default function CloneVideoWorkspace({
     );
     return () => setUsagePersistContext(userId ? { userId } : null);
   }, [userId, projectId]);
+
+  useEffect(() => {
+    if (step !== 3) {
+      setVisionLockBlocked(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      const status = await fetchVisionLockStatus();
+      if (!cancelled) {
+        setVisionLockBlocked(status.locked ? status : null);
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [step]);
 
   const persistProject = useCallback(
     async (opts: { step: WizardStep; scenesOverride?: CloneScene[] }) => {
@@ -478,6 +558,18 @@ export default function CloneVideoWorkspace({
         setFrames(applied.frames);
         setScenes(applied.scenes);
         setStep(applied.step);
+        const hadStuck = (project.data.scenes ?? []).some(
+          (s) => s.analyzeStatus === "loading" || s.promptStatus === "loading"
+        );
+        if (hadStuck) {
+          void updateCloneProject(project.id, userId, {
+            step: applied.step,
+            data: {
+              ...project.data,
+              scenes: buildStoredScenes(applied.scenes),
+            },
+          }).catch(() => {});
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load project");
       } finally {
@@ -547,6 +639,21 @@ export default function CloneVideoWorkspace({
           }
         )
       ),
+    [scenes]
+  );
+
+  const pendingAnalyzeCount = useMemo(
+    () => scenes.filter((s) => s.analyzeStatus !== "done" || !s.analysis?.trim()).length,
+    [scenes]
+  );
+
+  const pendingPromptCount = useMemo(
+    () =>
+      scenes.filter(
+        (s) =>
+          s.analysis?.trim() &&
+          (s.promptStatus !== "done" || !s.veoPrompt?.trim() || !s.scenePackage)
+      ).length,
     [scenes]
   );
 
@@ -640,6 +747,12 @@ export default function CloneVideoWorkspace({
       const sc = clampCloneSceneCount(parseInt(sceneCount, 10) || 6, result.frames.length);
       const bounds = autoSceneBoundaries(result.frames.length, sc);
       setBoundaryIndices(bounds);
+      if (!autoPipeline) {
+        setScenes([]);
+        setStep(2);
+        void persistProject({ step: 2 });
+        return;
+      }
       const newScenes = scenesFromBoundaries(result.frames, bounds).map((p) => ({
         sceneNumber: p.sceneNumber,
         debut: p.debut,
@@ -723,7 +836,62 @@ export default function CloneVideoWorkspace({
     setError(null);
     setStep(3);
     void persistProject({ step: 3, scenesOverride: newScenes });
-    void runAnalyzeAll(newScenes);
+    if (autoPipeline) {
+      void runAnalyzeAll(newScenes);
+    }
+  };
+
+  const runAnalyzeScene = async (sceneNumber: number) => {
+    if (isAnalyzing) return;
+    const i = scenes.findIndex((s) => s.sceneNumber === sceneNumber);
+    if (i < 0) return;
+    if (needsVideoResync) {
+      setError("Re-upload video w dir Re-sync frames qbel analyze.");
+      return;
+    }
+    const lock = await fetchVisionLockStatus();
+    if (lock.locked) {
+      setVisionLockBlocked(lock);
+      setError(visionLockWaitMessage(lock));
+      return;
+    }
+    setError(null);
+    const next = scenes.map((s) => ({ ...s }));
+    next[i] = { ...next[i], analyzeStatus: "loading" as const, error: undefined };
+    setScenes(next);
+    try {
+      await waitBeforeNextAnalyze();
+      const s = next[i];
+      const payload = await buildCloneAnalyzeRequest(s, frames);
+      const json = await postAiJson(
+        "/api/ai/veo-scene-analyze",
+        {
+          ...payload,
+          lockHint: `Scene ${s.sceneNumber}/${scenes.length}`,
+        },
+        180_000,
+        `Clone analyze — Scene ${s.sceneNumber} (${payload.sceneFrameImageUrls.length} frames)`
+      );
+      next[i] = {
+        ...next[i],
+        debutUrl: payload.debutImageUrl.startsWith("https://") ? payload.debutImageUrl : undefined,
+        finUrl: payload.finImageUrl.startsWith("https://") ? payload.finImageUrl : undefined,
+        analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
+        usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : undefined,
+        analyzeStatus: "done",
+      };
+    } catch (e) {
+      next[i] = {
+        ...next[i],
+        analyzeStatus: "error",
+        error: e instanceof Error ? e.message : "Analyze failed",
+      };
+    } finally {
+      markAnalyzeFinished();
+      await releaseVisionAnalyzeLock();
+      setScenes([...next]);
+      void persistProject({ step: 3, scenesOverride: next });
+    }
   };
 
   const runAnalyzeAll = async (sourceScenes?: CloneScene[]) => {
@@ -733,72 +901,149 @@ export default function CloneVideoWorkspace({
       setError("Re-upload video w dir Re-sync frames qbel analyze.");
       return;
     }
+    const targets = workScenes
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => s.analyzeStatus !== "done" || !s.analysis?.trim());
+    if (targets.length === 0) {
+      setError("Kolchi deja analyzed — dir Re-analyze 3la scene bohdha.");
+      return;
+    }
+    const lock = await fetchVisionLockStatus();
+    if (lock.locked) {
+      setVisionLockBlocked(lock);
+      setError(visionLockWaitMessage(lock));
+      return;
+    }
     setIsAnalyzing(true);
     setError(null);
-    const next: CloneScene[] = workScenes.map((s) => ({
-      ...s,
-      analyzeStatus: "loading" as const,
-      error: undefined,
-    }));
+    const next: CloneScene[] = workScenes.map((s) => ({ ...s }));
+    for (const { i } of targets) {
+      next[i] = { ...next[i], analyzeStatus: "loading", error: undefined };
+    }
     setScenes([...next]);
 
-    const tasks = workScenes.map((s, i) => async () => {
-      try {
-        const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts({
-          sceneNumber: s.sceneNumber,
-          debut: s.debut,
-          fin: s.fin,
-        });
-        const [debutImageUrl, finImageUrl] = await Promise.all([
-          prepareVisionImageUrl(s.debut.dataUrl, `scene-${s.sceneNumber}-debut.jpg`),
-          prepareVisionImageUrl(s.fin.dataUrl, `scene-${s.sceneNumber}-fin.jpg`),
-        ]);
-        const json = await postAiJson(
-          "/api/ai/veo-scene-analyze",
-          {
-            debutImageUrl,
-            finImageUrl,
-            debutPrompt,
-            finPrompt,
-            workflowMode: "clone",
-            sceneNumber: s.sceneNumber,
-            referenceDebutSec: s.debut.timeSec,
-            referenceFinSec: s.fin.timeSec,
-            veoOutputDurationSec: CLONE_VEO_SCENE_SECONDS,
-          },
-          180_000,
-          `Clone analyze — Scene ${s.sceneNumber}`
-        );
-        next[i] = {
-          ...next[i],
-          debutUrl: debutImageUrl.startsWith("https://") ? debutImageUrl : undefined,
-          finUrl: finImageUrl.startsWith("https://") ? finImageUrl : undefined,
-          analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
-          usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : undefined,
-          analyzeStatus: "done",
-        };
-      } catch (e) {
-        next[i] = {
-          ...next[i],
-          analyzeStatus: "error",
-          error: e instanceof Error ? e.message : "Analyze failed",
-        };
-      }
-      setScenes([...next]);
-    });
+    try {
+      const tasks = targets.map(({ i }) => async () => {
+        const s = workScenes[i];
+        try {
+          await waitBeforeNextAnalyze();
+          const payload = await buildCloneAnalyzeRequest(s, frames);
+          const json = await postAiJson(
+            "/api/ai/veo-scene-analyze",
+            {
+              ...payload,
+              lockHint: `Scene ${s.sceneNumber}/${workScenes.length}`,
+            },
+            180_000,
+            `Clone analyze — Scene ${s.sceneNumber} (${payload.sceneFrameImageUrls.length} frames)`
+          );
+          next[i] = {
+            ...next[i],
+            debutUrl: payload.debutImageUrl.startsWith("https://") ? payload.debutImageUrl : undefined,
+            finUrl: payload.finImageUrl.startsWith("https://") ? payload.finImageUrl : undefined,
+            analysis: typeof json.analysis === "string" ? json.analysis.trim() : "",
+            usageAnalyze: isAiUsagePayload(json.usage) ? json.usage : undefined,
+            analyzeStatus: "done",
+          };
+        } catch (e) {
+          next[i] = {
+            ...next[i],
+            analyzeStatus: "error",
+            error: e instanceof Error ? e.message : "Analyze failed",
+          };
+        }
+        setScenes([...next]);
+        markAnalyzeFinished();
+        void persistProject({ step: 3, scenesOverride: next });
+      });
 
-    await runWithConcurrency(tasks, CLONE_AI_CONCURRENCY);
+      await runWithConcurrency(tasks, CLONE_AI_CONCURRENCY);
 
-    setIsAnalyzing(false);
-    if (next.every((s) => s.analyzeStatus === "done")) {
-      setStep(4);
-      void persistProject({ step: 4, scenesOverride: next });
-      if (autoPipeline) {
-        void runGeneratePrompts(next);
+      if (next.every((s) => s.analyzeStatus === "done")) {
+        setStep(4);
+        void persistProject({ step: 4, scenesOverride: next });
+        if (autoPipeline) {
+          void runGeneratePrompts(next);
+        }
+      } else {
+        void persistProject({ step: 3, scenesOverride: next });
       }
-    } else {
-      void persistProject({ step: 3, scenesOverride: next });
+    } finally {
+      setIsAnalyzing(false);
+      await releaseVisionAnalyzeLock();
     }
+  };
+
+  const applyPromptApiResult = (
+    scene: CloneScene,
+    data: Record<string, unknown>
+  ): CloneScene => {
+    if (data.scenePackage != null) {
+      const pkg = data.scenePackage as Record<string, unknown>;
+      return {
+        ...scene,
+        scenePackage: pkg,
+        veoPrompt: typeof pkg.veoPrompt === "string" ? pkg.veoPrompt : "",
+        negativePrompt: typeof pkg.negativePrompt === "string" ? pkg.negativePrompt : "",
+        parseError: undefined,
+        rawPackageText: undefined,
+        usagePrompt: isAiUsagePayload(data.usage) ? data.usage : scene.usagePrompt,
+        promptStatus: "done",
+        error: undefined,
+      };
+    }
+    return {
+      ...scene,
+      scenePackage: undefined,
+      veoPrompt: "",
+      negativePrompt: "",
+      parseError: typeof data.parseError === "string" ? data.parseError : "JSON parse failed",
+      rawPackageText: typeof data.rawPackageText === "string" ? data.rawPackageText : "",
+      promptStatus: "error",
+    };
+  };
+
+  const runGeneratePromptScene = async (sceneNumber: number) => {
+    if (isGenerating || isAnalyzing) return;
+    const i = scenes.findIndex((s) => s.sceneNumber === sceneNumber);
+    if (i < 0) return;
+    if (!scenes[i].analysis?.trim()) {
+      setError(`Scene ${sceneNumber}: analyze lwl.`);
+      return;
+    }
+    setError(null);
+    const next = scenes.map((s) => ({ ...s }));
+    next[i] = { ...next[i], promptStatus: "loading" as const, error: undefined };
+    setScenes(next);
+
+    const refDuration =
+      duration > 0 ? duration : (next[next.length - 1]?.fin.timeSec ?? 0);
+    const fullScript = buildCloneFullScript(scenesForFullScript(next, frames), refDuration);
+
+    try {
+      const s = next[i];
+      const data = await postAiJson(
+        "/api/ai/veo-scene-package",
+        {
+          fullScript,
+          sceneNumber: s.sceneNumber,
+          imageAnalysis: s.analysis,
+          languageLabel: CLONE_LANGUAGE_LABEL,
+          workflowMode: "clone",
+        },
+        180_000,
+        `Clone Veo package — Scene ${s.sceneNumber}`
+      );
+      next[i] = applyPromptApiResult(next[i], data);
+    } catch (e) {
+      next[i] = {
+        ...next[i],
+        promptStatus: "error",
+        error: e instanceof Error ? e.message : "Prompt failed",
+      };
+    }
+    setScenes([...next]);
+    void persistProject({ step: 4, scenesOverride: next });
   };
 
   const runGeneratePrompts = async (sourceScenes?: CloneScene[]) => {
@@ -810,86 +1055,65 @@ export default function CloneVideoWorkspace({
 
     const refDuration =
       duration > 0 ? duration : (workScenes[workScenes.length - 1]?.fin.timeSec ?? 0);
-    const fullScript = buildCloneFullScript(
-      workScenes.map((s) => ({
-        sceneNumber: s.sceneNumber,
-        debut: s.debut,
-        fin: s.fin,
-        analysis: s.analysis,
-      })),
-      refDuration
-    );
+    const fullScript = buildCloneFullScript(scenesForFullScript(workScenes, frames), refDuration);
 
-    const next = workScenes.map((s) =>
-      s.analysis?.trim()
-        ? { ...s, promptStatus: "loading" as const, error: undefined }
-        : s
-    );
-    const pendingCount = next.filter((s) => s.promptStatus === "loading").length;
+    const next = workScenes.map((s) => ({ ...s }));
+    const targets = next
+      .map((s, i) => ({ s, i }))
+      .filter(
+        ({ s }) =>
+          s.analysis?.trim() &&
+          (s.promptStatus !== "done" || !s.veoPrompt?.trim() || !s.scenePackage)
+      );
+
+    if (targets.length === 0) {
+      setError("Kolchi deja 3ndo prompts — dir Regenerate 3la scene bohdha.");
+      setIsGenerating(false);
+      return;
+    }
+
+    for (const { i } of targets) {
+      next[i] = { ...next[i], promptStatus: "loading" as const, error: undefined };
+    }
+    const pendingCount = targets.length;
     setScenes([...next]);
     setGenerateProgress(
       pendingCount > 0
-        ? `Generating ${pendingCount} scene(s) (${CLONE_AI_CONCURRENCY} at a time)…`
+        ? `Generating ${pendingCount} pending scene(s) (${CLONE_AI_CONCURRENCY} at a time)…`
         : null
     );
 
     let done = 0;
-    const promptTasks = workScenes
-      .map((s, i) => ({ s, i }))
-      .filter(({ s }) => s.analysis?.trim())
-      .map(({ s, i }) => async () => {
-        try {
-          const data = await postAiJson(
-            "/api/ai/veo-scene-package",
-            {
-              fullScript,
-              sceneNumber: s.sceneNumber,
-              imageAnalysis: s.analysis,
-              languageLabel: "Moroccan Darija",
-              workflowMode: "clone",
-            },
-            180_000,
-            `Clone Veo package — Scene ${s.sceneNumber}`
-          );
+    const promptTasks = targets.map(({ s, i }) => async () => {
+      try {
+        const data = await postAiJson(
+          "/api/ai/veo-scene-package",
+          {
+            fullScript,
+            sceneNumber: s.sceneNumber,
+            imageAnalysis: s.analysis,
+            languageLabel: CLONE_LANGUAGE_LABEL,
+            workflowMode: "clone",
+          },
+          180_000,
+          `Clone Veo package — Scene ${s.sceneNumber}`
+        );
+        next[i] = applyPromptApiResult(next[i], data);
+      } catch (e) {
+        next[i] = {
+          ...next[i],
+          promptStatus: "error",
+          error: e instanceof Error ? e.message : "Prompt failed",
+        };
+      } finally {
+        done += 1;
+        setGenerateProgress(`Prompts ${done} / ${pendingCount} done…`);
+        setScenes([...next]);
+        void persistProject({ step: 4, scenesOverride: next });
+      }
+    });
 
-          if (data.scenePackage != null) {
-            const pkg = data.scenePackage as Record<string, unknown>;
-            next[i] = {
-              ...next[i],
-              scenePackage: pkg,
-              veoPrompt: typeof pkg.veoPrompt === "string" ? pkg.veoPrompt : "",
-              negativePrompt:
-                typeof pkg.negativePrompt === "string" ? pkg.negativePrompt : "",
-              usagePrompt: isAiUsagePayload(data.usage) ? data.usage : undefined,
-              promptStatus: "done",
-            };
-          } else {
-            next[i] = {
-              ...next[i],
-              scenePackage: undefined,
-              veoPrompt: "",
-              negativePrompt: "",
-              parseError:
-                typeof data.parseError === "string" ? data.parseError : "JSON parse failed",
-              rawPackageText:
-                typeof data.rawPackageText === "string" ? data.rawPackageText : "",
-              promptStatus: "error",
-            };
-          }
-        } catch (e) {
-          next[i] = {
-            ...next[i],
-            promptStatus: "error",
-            error: e instanceof Error ? e.message : "Prompt failed",
-          };
-        } finally {
-          done += 1;
-          setGenerateProgress(`Prompts ${done} / ${pendingCount} done…`);
-          setScenes([...next]);
-        }
-      });
-
-    await runWithConcurrency(promptTasks, CLONE_AI_CONCURRENCY);
+    await runWithConcurrency(promptTasks, CLONE_AI_CONCURRENCY, { minDelayMs: CLONE_AI_MIN_DELAY_MS });
 
     setIsGenerating(false);
     setGenerateProgress(null);
@@ -1203,25 +1427,65 @@ export default function CloneVideoWorkspace({
                 </div>
               </div>
 
-              <label className="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={autoPipeline}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    setAutoPipeline(on);
-                    try {
-                      localStorage.setItem("vf_auto_pipeline", on ? "true" : "false");
-                    } catch {
-                      /* ignore */
-                    }
-                  }}
-                />
-                <span>
-                  Auto-run full pipeline — extract → analyze → Veo prompts (wait until ready)
-                </span>
-              </label>
+              <fieldset className="space-y-2">
+                <legend className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                  How to run
+                </legend>
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors",
+                    autoPipeline ? "border-violet-400 bg-violet-50" : "border-gray-200 bg-gray-50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="pipelineMode"
+                    className="mt-1 accent-violet-600"
+                    checked={autoPipeline}
+                    onChange={() => {
+                      setAutoPipeline(true);
+                      try {
+                        localStorage.setItem("vf_auto_pipeline", "true");
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                  />
+                  <span className="text-sm">
+                    <span className="font-semibold block">Full pipeline</span>
+                    <span className="text-gray-500 text-xs">
+                      Extract → analyze → Veo prompts automatically
+                    </span>
+                  </span>
+                </label>
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors",
+                    !autoPipeline ? "border-violet-400 bg-violet-50" : "border-gray-200 bg-gray-50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="pipelineMode"
+                    className="mt-1 accent-violet-600"
+                    checked={!autoPipeline}
+                    onChange={() => {
+                      setAutoPipeline(false);
+                      try {
+                        localStorage.setItem("vf_auto_pipeline", "false");
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                  />
+                  <span className="text-sm">
+                    <span className="font-semibold block">Step by step</span>
+                    <span className="text-gray-500 text-xs">
+                      Pause after each step — you click Analyze &amp; Generate
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
 
               <button
                 type="button"
@@ -1230,8 +1494,13 @@ export default function CloneVideoWorkspace({
                 className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {isExtracting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                Start pipeline
+                {autoPipeline ? "Start full pipeline" : "Extract frames →"}
               </button>
+              <p className="text-xs text-gray-500 text-center">
+                {autoPipeline
+                  ? "Runs extract → analyze → Veo prompts automatically."
+                  : "Step by step: extract frames, adjust scenes, then run Analyze and Generate yourself."}
+              </p>
               {duration > 0 ? (
                 <p className="text-xs text-gray-500 text-center">Duration: {duration.toFixed(2)}s</p>
               ) : null}
@@ -1334,7 +1603,8 @@ export default function CloneVideoWorkspace({
                     <span className="font-bold text-violet-700">Scene {p.sceneNumber}</span>
                     <span className="text-gray-500">
                       #{p.debut.index + 1} ({p.debut.timeSec.toFixed(2)}s) → #{p.fin.index + 1} (
-                      {p.fin.timeSec.toFixed(2)}s)
+                      {p.fin.timeSec.toFixed(2)}s) · {p.sceneFrames.length} frame
+                      {p.sceneFrames.length !== 1 ? "s" : ""} for analyze
                     </span>
                   </li>
                 ))}
@@ -1346,7 +1616,7 @@ export default function CloneVideoWorkspace({
               onClick={confirmScenes}
               className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl disabled:opacity-50"
             >
-              Suivant: Analyze →
+              {autoPipeline ? "Confirm scenes → Analyze" : "Confirm scenes → Continue"}
             </button>
           </div>
         )}
@@ -1354,25 +1624,61 @@ export default function CloneVideoWorkspace({
         {step === 3 && (
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
             <h2 className="text-lg font-semibold">3 — Analyze chno tbeddel (debut → fin)</h2>
+            {visionLockBlocked ? (
+              <div
+                className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                role="alert"
+              >
+                <AlertCircle className="w-5 h-5 shrink-0 text-amber-600 mt-0.5" />
+                <p>{visionLockWaitMessage(visionLockBlocked)}</p>
+              </div>
+            ) : null}
             <p className="text-sm text-gray-600">
-              Vision y-3tik <strong>chno tbdl</strong> w <strong>TIMED ACTION SPLIT</strong> — kol
-              change f wa9t logic (0–8s), machi kolchi f nafs l-instant.
+              Vision analyzes <strong>every frame</strong> between each scene&apos;s debut and fin
+              (not just the two endpoints), then outputs <strong>TIMED ACTION SPLIT</strong> for
+              0–8s Veo.
             </p>
             <button
               type="button"
-              disabled={isAnalyzing || scenes.length === 0}
+              disabled={
+                isAnalyzing ||
+                !!visionLockBlocked ||
+                scenes.length === 0 ||
+                pendingAnalyzeCount === 0
+              }
               onClick={() => void runAnalyzeAll()}
               className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {isAnalyzing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              Analyze {scenes.length} scene(s)
+              {pendingAnalyzeCount > 0
+                ? `Analyze pending (${pendingAnalyzeCount})`
+                : "All scenes analyzed"}
             </button>
+            <p className="text-xs text-gray-500 text-center">
+              Scenes run <strong>one at a time</strong> with an ~8s pause between each (avoids OpenAI rate
+              limits). Use <strong>Re-analyze</strong> on each card for a single scene.
+            </p>
             <div className="space-y-4">
               {scenes.map((s) => (
                 <div key={s.sceneNumber} className="border border-gray-100 rounded-xl p-4 space-y-3">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="font-bold">Scene {s.sceneNumber}</span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        disabled={isAnalyzing || isGenerating || !!visionLockBlocked}
+                        onClick={() => void runAnalyzeScene(s.sceneNumber)}
+                        className="text-xs px-2.5 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-800 font-medium disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {s.analyzeStatus === "loading" ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3 h-3" />
+                        )}
+                        {s.analyzeStatus === "done" && s.analysis?.trim()
+                          ? "Re-analyze"
+                          : "Analyze"}
+                      </button>
                       {s.usageAnalyze ? <AiUsageCostChip usage={s.usageAnalyze} /> : null}
                       {s.analyzeStatus === "loading" ? (
                       <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
@@ -1421,19 +1727,21 @@ export default function CloneVideoWorkspace({
               <h2 className="text-lg font-semibold">4 — Veo prompts & download</h2>
               <button
                 type="button"
-                disabled={isGenerating}
+                disabled={isGenerating || pendingPromptCount === 0}
                 onClick={() => void runGeneratePrompts()}
                 className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {isGenerating ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                Generi Veo prompts
+                {pendingPromptCount > 0
+                  ? `Generate pending prompts (${pendingPromptCount})`
+                  : "All prompts generated"}
               </button>
               {generateProgress ? (
                 <p className="text-xs text-violet-800 text-center">{generateProgress}</p>
               ) : null}
-              <p className="text-[11px] text-gray-500 text-center leading-snug">
-                Nafs rich package dial Video Flow: full script + SCENE METADATA + clone mode (400–700+ mots
-                veoPrompt).
+              <p className="text-xs text-gray-500 text-center">
+                Use <strong>Regenerate</strong> on each scene card for one scene at a time. Full JSON
+                package is saved to your project in the database.
               </p>
               <FlowExtensionBar scenes={flowExportScenes} disabled={isGenerating} />
             </div>
@@ -1453,6 +1761,25 @@ export default function CloneVideoWorkspace({
                   <div className="flex flex-wrap items-center gap-2">
                     {s.usageAnalyze ? <AiUsageCostChip usage={s.usageAnalyze} /> : null}
                     {s.usagePrompt ? <AiUsageCostChip usage={s.usagePrompt} /> : null}
+                    <button
+                      type="button"
+                      disabled={
+                        isGenerating ||
+                        isAnalyzing ||
+                        !s.analysis?.trim()
+                      }
+                      onClick={() => void runGeneratePromptScene(s.sceneNumber)}
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-800 font-medium disabled:opacity-50 flex items-center gap-1"
+                    >
+                      {s.promptStatus === "loading" ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3 h-3" />
+                      )}
+                      {s.promptStatus === "done" && s.scenePackage
+                        ? "Regenerate"
+                        : "Generate prompt"}
+                    </button>
                     <button
                     type="button"
                     onClick={() => void downloadScenePairZip(s)}
