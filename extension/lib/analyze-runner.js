@@ -142,7 +142,7 @@ export async function runAnalyzeJob(projectId) {
     await runWithConcurrency(tasks, CLONE_AI_CONCURRENCY);
   } finally {
     await saveChain;
-    await releaseVisionAnalyzeLock(await getApiBase());
+    await releaseVisionAnalyzeLock();
     await chrome.storage.local.set({
       [ANALYZE_JOB_KEY]: {
         running: false,

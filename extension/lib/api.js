@@ -1,7 +1,8 @@
-const DEFAULT_BASE = "http://localhost:3000";
-
+import { DEFAULT_API_BASE_URL } from "./supabase-defaults.js";
 import { getValidSession } from "./auth.js";
 import { isAiRateLimitError, parseOpenAiRetryMs, withAiRateLimitRetry } from "./ai-rate-limit-retry.js";
+
+const DEFAULT_BASE = DEFAULT_API_BASE_URL || "http://localhost:3000";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

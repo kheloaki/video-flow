@@ -7,7 +7,7 @@ async function rest(path, options = {}) {
     throw new Error("Supabase not configured.");
   }
   if (!session?.accessToken) {
-    throw new Error("Sign in from Settings (email/password) or sync from the web app.");
+    throw new Error("Sign in from Settings (email/password).");
   }
   const url = `${config.url}/rest/v1${path}`;
   const headers = {

@@ -231,6 +231,18 @@ body.sidebar-mode .pair-images {
   cursor: pointer;
 }
 
+.clone-saved-projects {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.saved-project-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .topbar {
   display: flex;
   align-items: center;

@@ -83,6 +83,7 @@ const state = {
   isAdmin: false,
   isGeneratingPrompts: false,
   visionLockBlocked: null,
+  needsVideoResync: false,
 };
 
 let persistTimer = null;
@@ -132,6 +133,16 @@ function projectStatus() {
   return state.step >= 2 ? "scenes" : "draft";
 }
 
+function frameProjectKey() {
+  return state.dbProjectId || state.projectId;
+}
+
+function sceneImageSrc(dataUrl, httpsUrl) {
+  if (dataUrl?.startsWith("data:")) return dataUrl;
+  if (httpsUrl?.startsWith("https://")) return httpsUrl;
+  return dataUrl || httpsUrl || "";
+}
+
 function schedulePersist() {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => void persistAll(), 350);
@@ -140,9 +151,10 @@ function schedulePersist() {
 async function persistAll() {
   if (!state.projectId) state.projectId = crypto.randomUUID();
 
+  const frameKey = frameProjectKey();
   if (state.frames.length) {
     await saveFrames(
-      state.projectId,
+      frameKey,
       state.frames.map((f) => ({ index: f.index, dataUrl: f.dataUrl }))
     );
   }
@@ -162,8 +174,9 @@ async function persistAll() {
 
   await chrome.storage.local.set({
     [DRAFT_META_KEY]: meta,
-    [ACTIVE_PROJECT_KEY]: state.projectId,
+    [ACTIVE_PROJECT_KEY]: frameKey,
   });
+  state.projectId = frameKey;
   updateDbBadge("local");
 
   if (!(await isLoggedIn()) || !state.frames.length) return;
@@ -187,9 +200,20 @@ async function persistAll() {
         status: projectStatus(),
         data,
       });
+      const prevKey = state.projectId;
       state.dbProjectId = created.id;
       meta.dbProjectId = created.id;
-      await chrome.storage.local.set({ [DRAFT_META_KEY]: meta });
+      if (prevKey !== created.id && state.frames.length) {
+        await saveFrames(
+          created.id,
+          state.frames.map((f) => ({ index: f.index, dataUrl: f.dataUrl }))
+        );
+      }
+      state.projectId = created.id;
+      await chrome.storage.local.set({
+        [DRAFT_META_KEY]: meta,
+        [ACTIVE_PROJECT_KEY]: created.id,
+      });
     }
     updateDbBadge("db");
     const el = $("#saveStatus");
@@ -230,6 +254,9 @@ async function restoreFromMeta(meta, frameRows) {
       const fin = state.frames.find((f) => f.index === s.finIndex);
       if (fin && s.finTimeSec) fin.timeSec = s.finTimeSec;
     }
+    state.needsVideoResync = false;
+  } else {
+    state.needsVideoResync = !!(meta.scenes?.length);
   }
 
   if (meta.scenes?.length) {
@@ -438,7 +465,7 @@ async function loadProjectFromDb(dbId) {
   const project = await fetchCloneProject(dbId);
   if (!project) return;
   state.dbProjectId = project.id;
-  state.projectId = state.projectId ?? crypto.randomUUID();
+  state.projectId = project.id;
   state.videoName = project.sourceVideoName;
   state.duration = project.durationSec ?? 0;
   state.extractMode = project.data.extractMode ?? "count";
@@ -447,13 +474,14 @@ async function loadProjectFromDb(dbId) {
   state.sceneCount = Number(project.data.sceneCount) || 6;
   state.boundaryIndices = project.data.boundaryIndices ?? [];
 
-  const frameRows = await loadFrames(state.projectId);
+  const frameRows = await loadFrames(project.id);
   state.frames = frameRows.map((r) => ({
     id: `f-${r.index}`,
     index: r.index,
     timeSec: 0,
     dataUrl: r.dataUrl,
   }));
+  state.needsVideoResync = frameRows.length === 0;
 
   state.scenes = (project.data.scenes ?? []).map((s) => {
     const debut = state.frames[s.debutIndex] ?? {
@@ -493,7 +521,29 @@ async function loadProjectFromDb(dbId) {
   goStep(Math.min(4, Math.max(1, project.step)), { skipPersist: true });
   renderFrames();
   renderScenes();
-  showStatus(`Loaded: ${project.name}`);
+  await chrome.storage.local.set({
+    [DRAFT_META_KEY]: {
+      step: state.step,
+      duration: state.duration,
+      extractMode: state.extractMode,
+      frameCount: state.frameCount,
+      intervalSec: state.intervalSec,
+      sceneCount: state.sceneCount,
+      boundaryIndices: state.boundaryIndices,
+      videoName: state.videoName,
+      dbProjectId: state.dbProjectId,
+      scenes: state.scenes.map(cloneSceneToStored),
+    },
+    [ACTIVE_PROJECT_KEY]: project.id,
+  });
+  if (state.needsVideoResync) {
+    showStatus(
+      `Loaded "${project.name}" from DB — re-upload video to re-sync frames for analyze.`,
+      "error"
+    );
+  } else {
+    showStatus(`Loaded from DB: ${project.name}`);
+  }
 }
 
 function usageChipHtml(usage) {
@@ -550,6 +600,30 @@ function updateDbBadge(mode) {
   }
 }
 
+async function renderCloneSavedProjects(projects) {
+  const box = $("#cloneSavedProjects");
+  if (!box) return;
+  if (!projects?.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = `
+    <p class="label">Saved projects (Supabase)</p>
+    <div class="saved-project-buttons">
+      ${projects
+        .map(
+          (p) =>
+            `<button type="button" class="btn secondary sm" data-id="${p.id}">${escapeHtml(p.name)} · step ${p.step}</button>`
+        )
+        .join("")}
+    </div>`;
+  box.querySelectorAll("button[data-id]").forEach((btn) => {
+    btn.addEventListener("click", () => void loadProjectFromDb(btn.dataset.id));
+  });
+}
+
 async function refreshAuthUi() {
   const session = await getSession();
   const loggedIn = !!(session?.accessToken && session?.userId);
@@ -567,7 +641,7 @@ async function refreshAuthUi() {
     outEl?.classList.add("hidden");
     inEl?.classList.remove("hidden");
   } else {
-    statusEl.textContent = "Sign in to save projects and track usage.";
+    statusEl.textContent = "Sign in with email/password — projects save to Supabase.";
     outEl?.classList.remove("hidden");
     inEl?.classList.add("hidden");
   }
@@ -580,10 +654,12 @@ async function refreshAuthUi() {
   const projectsBox = $("#savedProjects");
   if (!loggedIn) {
     if (projectsBox) projectsBox.innerHTML = "";
+    await renderCloneSavedProjects(null);
     return;
   }
   try {
     const projects = await listCloneProjects();
+    await renderCloneSavedProjects(projects);
     const box = $("#savedProjects");
     if (!projects.length) {
       box.innerHTML = "<p class='muted'>No DB projects yet.</p>";
@@ -600,6 +676,7 @@ async function refreshAuthUi() {
     });
   } catch (e) {
     $("#savedProjects").innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+    await renderCloneSavedProjects(null);
   }
 }
 
@@ -985,11 +1062,11 @@ function sceneCardHtml(s, large = false) {
       <h3>Scene ${s.sceneNumber} ${analyzeBadge} ${promptBadge} ${usageChipHtml(s.usageAnalyze)} ${usageChipHtml(s.usagePrompt)}</h3>
       <div class="pair-images ${imgClass}">
         <figure>
-          <img src="${s.debut.dataUrl}" alt="debut" />
+          <img src="${sceneImageSrc(s.debut.dataUrl, s.debutUrl)}" alt="debut" />
           <figcaption>Debut · ${s.debut.timeSec.toFixed(2)}s</figcaption>
         </figure>
         <figure>
-          <img src="${s.fin.dataUrl}" alt="fin" />
+          <img src="${sceneImageSrc(s.fin.dataUrl, s.finUrl)}" alt="fin" />
           <figcaption>Fin · ${s.fin.timeSec.toFixed(2)}s</figcaption>
         </figure>
       </div>
@@ -1097,6 +1174,7 @@ async function onExtract() {
     });
     state.duration = result.duration;
     state.frames = result.frames;
+    state.needsVideoResync = false;
     const sc = clampCloneSceneCount(state.sceneCount, result.frames.length);
     state.sceneCount = sc;
     state.boundaryIndices = autoSceneBoundaries(result.frames.length, sc);
@@ -1160,6 +1238,10 @@ async function onAnalyzeAll() {
     goStep(4);
     return;
   }
+  if (state.needsVideoResync) {
+    showStatus("Re-upload video on step 1 to re-sync frames before analyze.", "error");
+    return;
+  }
   const lock = await fetchVisionLockStatus();
   if (lock.locked) {
     state.visionLockBlocked = lock;
@@ -1196,6 +1278,10 @@ async function onAnalyzeAll() {
 async function analyzeOneScene(sceneNumber) {
   if (state.analyzeJobRunning) {
     showStatus("Wait for bulk analyze to finish.", "error");
+    return;
+  }
+  if (state.needsVideoResync) {
+    showStatus("Re-upload video on step 1 to re-sync frames before analyze.", "error");
     return;
   }
   const lock = await fetchVisionLockStatus();
@@ -2146,6 +2232,7 @@ function bindUi() {
     if (!file) return;
     state.videoFile = file;
     state.videoName = file.name;
+    state.needsVideoResync = false;
     if (state.videoObjectUrl) URL.revokeObjectURL(state.videoObjectUrl);
     state.videoObjectUrl = URL.createObjectURL(file);
     const vid = $("#videoPreview");
