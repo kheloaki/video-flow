@@ -218,6 +218,14 @@ export async function fetchDailySummariesFromDb(
   d.setDate(d.getDate() - (days - 1));
   d.setHours(0, 0, 0, 0);
   const rows = await fetchUsageLogsSince(ownerId, d.toISOString());
+  return buildDailySummariesFromRows(rows, days);
+}
+
+/** Aggregate log rows into one summary per calendar day (newest first). */
+export function buildDailySummariesFromRows(
+  rows: DbUsageRow[],
+  days: number
+): AiUsageDaySummary[] {
   const byDay: Record<string, DbUsageRow[]> = {};
   for (const r of rows) {
     const k = dayKey(r.created_at);
@@ -232,6 +240,24 @@ export async function fetchDailySummariesFromDb(
     const agg = aggregateRows(dayRows);
     out.push({ day: k, ...agg });
     cursor.setDate(cursor.getDate() - 1);
+  }
+  return out;
+}
+
+/** Per-user daily summaries for a date range (newest day first). */
+export function buildDailySummariesByUser(
+  rows: DbUsageRow[],
+  days: number
+): Map<string, AiUsageDaySummary[]> {
+  const byUser = new Map<string, DbUsageRow[]>();
+  for (const r of rows) {
+    const list = byUser.get(r.owner_id) ?? [];
+    list.push(r);
+    byUser.set(r.owner_id, list);
+  }
+  const out = new Map<string, AiUsageDaySummary[]>();
+  for (const [userId, userRows] of byUser) {
+    out.set(userId, buildDailySummariesFromRows(userRows, days));
   }
   return out;
 }

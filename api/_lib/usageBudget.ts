@@ -66,10 +66,12 @@ export async function checkAiUsageBudget(req: RequestLike): Promise<UsageBudgetR
   if (!userId) return { allowed: true };
 
   const profiles = (await supabaseFetch(
-    `/rest/v1/profiles?id=eq.${userId}&select=ai_daily_budget_usd,ai_daily_token_limit,ai_monthly_budget_usd`,
+    `/rest/v1/profiles?id=eq.${userId}&select=is_admin,account_status,ai_daily_budget_usd,ai_daily_token_limit,ai_monthly_budget_usd`,
     token,
     env
   )) as Array<{
+    is_admin: boolean | null;
+    account_status: string | null;
     ai_daily_budget_usd: number | null;
     ai_daily_token_limit: number | null;
     ai_monthly_budget_usd: number | null;
@@ -77,6 +79,19 @@ export async function checkAiUsageBudget(req: RequestLike): Promise<UsageBudgetR
 
   const profile = profiles?.[0];
   if (!profile) return { allowed: true };
+
+  const isAdmin = profile.is_admin === true;
+  const accountStatus = profile.account_status ?? "pending";
+  if (!isAdmin && accountStatus !== "active") {
+    return {
+      allowed: false,
+      status: 403,
+      error:
+        accountStatus === "pending"
+          ? "Account pending approval. Ask an admin to activate your account."
+          : "Account inactive. Ask an admin to reactivate your account.",
+    };
+  }
 
   const dailyBudget =
     profile.ai_daily_budget_usd != null ? Number(profile.ai_daily_budget_usd) : null;

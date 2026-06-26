@@ -1,6 +1,16 @@
 import type { AiUsagePayload } from "./aiUsage.js";
 import { parseOpenAiUsage } from "./aiUsage.js";
 import { fetchOpenAiChat } from "./openaiRetry.js";
+import {
+  buildContentStylePackageBlock,
+  buildContentStyleVisionBlock,
+  CLONE_AUDIO_LABEL,
+  CLONE_LANGUAGE_LABEL,
+  parseCloneContentStyle,
+  type CloneContentStyle,
+} from "./cloneContentStyle.js";
+
+export { CLONE_LANGUAGE_LABEL, CLONE_AUDIO_LABEL };
 
 export type VeoScenePackageRequestBody = {
   fullScript?: string;
@@ -14,6 +24,7 @@ export type VeoScenePackageRequestBody = {
   imageAnalysis?: string;
   /** `clone` = reference video reproduction (long veoPrompt like Video Flow). Default `ad`. */
   workflowMode?: "ad" | "clone";
+  contentStyle?: CloneContentStyle;
 };
 
 export type VeoSceneAnalyzeRequestBody = {
@@ -34,6 +45,8 @@ export type VeoSceneAnalyzeRequestBody = {
   sceneFrameImageUrls?: string[];
   /** Seconds in source video for each frame in sceneFrameImageUrls. */
   sceneFrameTimesSec?: number[];
+  /** Timelapse vs standard — shapes vision analysis depth and pacing. */
+  contentStyle?: CloneContentStyle;
 };
 
 export type VeoSceneAnalyzeResult =
@@ -130,28 +143,36 @@ function omitTextOnScreen(pkg: unknown): unknown {
   return pkg;
 }
 
-export const CLONE_LANGUAGE_LABEL = "ambient source audio only (no spoken dialogue)";
-
 function buildVeoPackageUserPrompt(args: {
   fullScript: string;
   sceneNumber: number;
   imageAnalysis: string;
   languageLabel: string;
   workflowMode?: "ad" | "clone";
+  contentStyle?: CloneContentStyle;
 }): string {
-  const { fullScript, sceneNumber, imageAnalysis, languageLabel, workflowMode = "ad" } = args;
+  const {
+    fullScript,
+    sceneNumber,
+    imageAnalysis,
+    languageLabel,
+    workflowMode = "ad",
+    contentStyle = "standard",
+  } = args;
   const isClone = workflowMode === "clone";
-  const langJson = JSON.stringify(isClone ? CLONE_LANGUAGE_LABEL : languageLabel);
+  const langJson = JSON.stringify(isClone ? CLONE_AUDIO_LABEL : languageLabel);
 
   const cloneModeBlock = isClone
     ? `
 CLONE VIDEO MODE (mandatory):
 - Reproduce the REFERENCE clip for scene ${sceneNumber} — not a new ad concept.
 - IMAGE ANALYSIS is ground truth: use "PROGRESSION A → … → B" (every reference frame), "CHANGES A → B", and "TIMED ACTION SPLIT" as the motion schedule.
-- veoPrompt: 400–700+ words in clear English — opening frame, environment, subjects, props, lighting, lens feel, beat-by-beat motion mapped to TIMED ACTION SPLIT, camera path, pacing for 8.0s.
-- Include an "Audio / ambience" paragraph: environmental sounds from reference (tools, machinery, footsteps, wind, impacts, room tone). NO scripted narration.
-- negativePrompt: 20+ comma-separated constraints (identity drift, captions, watermark, bad anatomy, etc.).
-- actionFlow, shotDesign, motionPlan, continuity.mustPreserve (6+ items), generationNotes: all detailed.
+- veoPrompt: 500–800+ words in clear English — opening frame, environment, subjects, props, lighting, lens feel, beat-by-beat motion mapped to TIMED ACTION SPLIT, camera path, pacing for 8.0s.
+- Include a detailed "Audio / ambience" paragraph: list specific diegetic action SFX (tools, engines, impacts, footsteps, wind). NO music bed, NO song, NO soundtrack.
+- negativePrompt: 25+ comma-separated constraints (identity drift, captions, watermark, bad anatomy, music, soundtrack, song, voiceover, etc.).
+- actionFlow, shotDesign, motionPlan, continuity.mustPreserve (8+ items), generationNotes: all detailed.
+
+${buildContentStylePackageBlock(contentStyle)}
 `
     : "";
 
@@ -163,12 +184,13 @@ CLONE VIDEO MODE (mandatory):
 - Use TIMED ACTION SPLIT beats exactly — one major change per window, never all at once.
 - Preserve everything listed under WHAT STAYED THE SAME in IMAGE ANALYSIS.
 
-Audio rules (CRITICAL — no Darija / no voiceover script):
-- Default: ambient source audio ONLY — sounds that belong in the reference scene (machinery, tools, footsteps, wind, water, impacts, room tone).
+Audio rules (CRITICAL — action sounds only, NO music):
+- ONLY diegetic action/environment SFX from the reference scene (machinery, tools, footsteps, wind, water, impacts, room tone, engines).
+- NO music, NO song, NO soundtrack, NO cinematic score unless IMAGE ANALYSIS explicitly confirms music is audible in reference.
 - voiceoverDarija and voiceoverDarijaClearTTS MUST remain empty strings "".
 - speaker.isSpeakingToCamera: false and speaker.lipSyncRequired: false UNLESS IMAGE ANALYSIS explicitly confirms visible on-camera speech with lip movement.
 - Do NOT invent marketing copy, Darija, Arabic, French, or English narration.
-- In veoPrompt, describe ambient sound bed briefly; do NOT write dialogue lines.
+- In veoPrompt, describe action SFX bed in detail; do NOT write dialogue lines or music cues.
 
 Scene extraction rules:
 - Extract only scene ${sceneNumber}.
@@ -248,7 +270,7 @@ Naturally include in veoPrompt and negativePrompt:
 - no subtitles, no captions, no watermark, no logo, no fake UI
 - no identity drift, no outfit change, no room swap (unless reference changes it)
 - no bad anatomy, no extra fingers, no chaotic shake
-${isClone ? "- no spoken dialogue, no voiceover narration, no Darija/Arabic speech (ambient sound only unless reference shows speech)" : ""}
+${isClone ? "- no spoken dialogue, no voiceover narration, no music, no song, no soundtrack (action SFX only unless reference has music or speech)" : ""}
 
 Use this exact JSON string for the field "language": ${langJson}
 ${isClone ? "- voiceoverDarija and voiceoverDarijaClearTTS must be empty strings." : ""}
@@ -437,6 +459,8 @@ FIN_PROMPT: {{FIN}}
 
 {{TIMING_BLOCK}}
 
+{{CONTENT_STYLE_BLOCK}}
+
 CRITICAL RULES:
 - Examine BOTH images pixel-by-pixel. NEVER assume "no people" — count every person, vehicle, machine, animal, prop.
 - If workers, equipment, or objects appear in A but not B (or the reverse), you MUST list them under "Changes A → B".
@@ -517,11 +541,13 @@ VEO RISKS & NOTES:
 - Elements to exclude from generation (overlays, watermarks):
 - Realism flags:
 
-AUDIO / SOUND (ambient only unless speech visible in reference):
-- Environmental sounds:
-- Tool / machine / impact sounds:
+AUDIO / SOUND (action SFX only — NO music unless clearly in reference):
+- Environmental / ambient action sounds (wind, room tone, outdoor bed):
+- Tool / machine / vehicle / impact sounds (list each heard or implied):
+- Human action sounds (footsteps, handling, shouts — if any):
 - Visible speech / lip sync: [none | describe]
-- Veo: ambient source audio; NO Darija/Arabic/French voiceover script
+- Music / song / soundtrack in reference: [none | describe — default none]
+- Veo output audio: diegetic action SFX ONLY; NO added music, NO score, NO Darija/Arabic/French/English voiceover script
 
 One-Line Summary for Prompt Writer:
 [Single sentence: visual motion A → B in 8 seconds; ambient sound only unless speech visible]`;
@@ -540,6 +566,8 @@ DEBUT_PROMPT: {{DEBUT}}
 FIN_PROMPT: {{FIN}}
 {{TIMING_BLOCK}}
 
+{{CONTENT_STYLE_BLOCK}}
+
 CRITICAL:
 - Analyze ALL {{FRAME_COUNT}} images individually — skipping frames is forbidden.
 - For each frame i→i+1, list every visible delta (even subtle: hands, shadows, tools, dust).
@@ -551,11 +579,11 @@ Plain text only. No JSON. No VEO prompt.
 Scene Type:
 [construction/timelapse | demo | B-roll | lifestyle | UGC | other]
 
-PROGRESSION A → … → B (exactly {{FRAME_COUNT}} entries — one per attached image):
+PROGRESSION A → … → B (exactly {{FRAME_COUNT}} entries — one per attached image; minimum 4 bullet lines per frame):
 For i = 1..{{FRAME_COUNT}}:
   Frame [i] @ [time]s:
-  - Snapshot: people, subject, environment, structures, machinery/props, camera, lighting, overlays
-  - Delta vs frame i-1: [all changes or "—" for i=1]
+  - Snapshot (detailed): people count/positions/clothing, main subject, environment, structures/terrain state, machinery/props with positions, camera rig, lighting, shadows, overlays
+  - Delta vs frame i-1 (exhaustive): every added/removed/moved element, even subtle (dust, partial completion, shadow shift, tool reposition)
 
 IMAGE A / IMAGE B — summary snapshots (debut + fin)
 
@@ -572,12 +600,12 @@ Beat | change | window | viewer sees | source frames
 8-SECOND MOTION PLAN:
 - 0.0–2.0s / 2.0–4.0s / 4.0–6.0s / 6.0–{{VEO_DURATION}}s (tie to frame progression)
 
-AUDIO / SOUND (ambient only unless speech visible):
-- Environmental / ambient sounds:
-- Tool / machine / impact sounds:
+AUDIO / SOUND (action SFX only — NO music unless clearly in reference):
+- Environmental / ambient action sounds:
+- Tool / machine / vehicle / impact sounds (enumerate):
 - Visible speech / lip sync: [none | describe]
-- Music / narration: [none | yes]
-- Veo: ambient source audio bed; NO Darija/Arabic/French/English voiceover script
+- Music / song / soundtrack in reference: [none | describe — default none]
+- Veo: diegetic action SFX bed ONLY; NO music, NO score, NO voiceover script
 
 VEO RISKS & NOTES:
 
@@ -620,6 +648,7 @@ function buildVisionUserText(
     veoOutputDurationSec?: number;
     frameCount?: number;
     frameTimesSec?: number[];
+    contentStyle?: CloneContentStyle;
   }
 ): string {
   const veoDuration = timing?.veoOutputDurationSec ?? 8;
@@ -650,6 +679,12 @@ function buildVisionUserText(
   return template
     .replace("{{DEBUT}}", debutPrompt || "(none)")
     .replace("{{FIN}}", finPrompt || "(none)")
+    .replace(
+      "{{CONTENT_STYLE_BLOCK}}",
+      workflowMode === "clone"
+        ? buildContentStyleVisionBlock(timing?.contentStyle ?? "standard")
+        : ""
+    )
     .replace(/\{\{FRAME_COUNT\}\}/g, String(frameCount))
     .replace(/\{\{FRAME_COUNT_MINUS_ONE\}\}/g, String(Math.max(1, frameCount - 1)))
     .replace("{{FRAME_TIMES_LIST}}", frameTimesList)
@@ -696,6 +731,7 @@ export async function runVeoSceneAnalyze(
       : Number(body.referenceDebutSec);
   const referenceFinSec =
     typeof body.referenceFinSec === "number" ? body.referenceFinSec : Number(body.referenceFinSec);
+  const contentStyle = parseCloneContentStyle(body.contentStyle);
 
   const rawSceneFrames = Array.isArray(body.sceneFrameImageUrls)
     ? body.sceneFrameImageUrls
@@ -756,6 +792,7 @@ export async function runVeoSceneAnalyze(
               : frameTimesSec.length > 0
                 ? frameTimesSec
                 : undefined,
+          contentStyle,
         }),
       },
       ...imageUrls.map((url) => ({
@@ -791,7 +828,7 @@ export async function runVeoSceneAnalyze(
 export async function runVeoScenePackageFromAnalysis(
   body: Pick<
     VeoScenePackageRequestBody,
-    "fullScript" | "sceneNumber" | "languageLabel" | "imageAnalysis" | "workflowMode"
+    "fullScript" | "sceneNumber" | "languageLabel" | "imageAnalysis" | "workflowMode" | "contentStyle"
   >,
   env: { apiKey: string; model?: string }
 ): Promise<VeoScenePackageResult> {
@@ -804,9 +841,10 @@ export async function runVeoScenePackageFromAnalysis(
     typeof body.imageAnalysis === "string" ? body.imageAnalysis.trim() : "";
   const workflowMode =
     body.workflowMode === "clone" || body.workflowMode === "ad" ? body.workflowMode : "ad";
+  const contentStyle = parseCloneContentStyle(body.contentStyle);
   const languageLabel =
     workflowMode === "clone"
-      ? CLONE_LANGUAGE_LABEL
+      ? CLONE_AUDIO_LABEL
       : typeof body.languageLabel === "string" && body.languageLabel.trim()
         ? body.languageLabel.trim()
         : "Moroccan Darija";
@@ -825,6 +863,7 @@ export async function runVeoScenePackageFromAnalysis(
       imageAnalysis,
       languageLabel,
       workflowMode,
+      contentStyle,
     });
 
     const { content: jsonRaw, usage } = await openaiChat(

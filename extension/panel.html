@@ -33,15 +33,16 @@
     </nav>
 
     <div id="statusBar" class="status-bar hidden"></div>
+    <div id="accountGate" class="account-gate hidden"></div>
 
     <div class="panel-scroll">
     <main id="tab-clone" class="tab-panel active">
+      <section id="cloneHistory" class="clone-history hidden"></section>
       <section id="pipelineBoard" class="pipeline-board card hidden"></section>
       <nav class="steps" id="stepNav"></nav>
 
       <section id="clone-step-1" class="card">
         <h2>1 — Upload video & settings</h2>
-        <div id="cloneSavedProjects" class="saved-projects clone-saved-projects hidden"></div>
         <label class="upload-zone">
           <input type="file" id="videoInput" accept="video/*" hidden />
           <span class="upload-icon">🎬</span>
@@ -70,6 +71,24 @@
           </label>
         </div>
         <div id="flowSettingsSummary" class="flow-settings-summary"></div>
+
+        <fieldset class="pipeline-mode-choice">
+          <legend class="label">Video style</legend>
+          <label class="mode-option">
+            <input type="radio" name="contentStyle" value="standard" checked />
+            <span class="mode-option-body">
+              <strong>Standard clone</strong>
+              <span class="muted">Match reference — action sounds only (no music)</span>
+            </span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="contentStyle" value="timelapse" />
+            <span class="mode-option-body">
+              <strong>Timelapse / progression</strong>
+              <span class="muted">Construction, assembly, fast-forward build — step-by-step beats</span>
+            </span>
+          </label>
+        </fieldset>
 
         <fieldset class="pipeline-mode-choice">
           <legend class="label">How to run</legend>
@@ -126,7 +145,7 @@
     <main id="tab-queue" class="tab-panel hidden">
       <section class="card">
         <h2>Flow queue</h2>
-        <p class="hint">Queue scenes from Clone tab, then run them one after another in Google Flow.</p>
+        <p class="hint">Scenes sync via Supabase — queue from the web app or Clone tab, then run them in Google Flow.</p>
         <div id="queueDoneBanner" class="queue-done-banner hidden" role="status"></div>
         <div class="row queue-toolbar">
           <button type="button" id="btnFillSelected" class="btn primary">Run selected scenes</button>
@@ -187,11 +206,6 @@
           </label>
           <button type="button" id="btnSignIn" class="btn primary full">Sign in</button>
           <p id="authError" class="auth-error hidden"></p>
-          <details class="advanced-settings mt">
-            <summary>Optional — sync login from website tab</summary>
-            <p class="hint">Only if you already signed in on the Video Flow website in another tab.</p>
-            <button type="button" id="btnSyncAuth" class="btn secondary sm full">Sync from website tab</button>
-          </details>
         </div>
 
         <div id="authLoggedIn" class="hidden">

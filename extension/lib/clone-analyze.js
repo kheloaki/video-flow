@@ -2,14 +2,17 @@ import { getSceneFrames, subsampleSceneFrames } from "./video-frames.js";
 import { prepareSceneFrameImageUrls } from "./images.js";
 import { buildCloneDebutFinPrompts, CLONE_VEO_SCENE_SECONDS } from "./clone-prompts.js";
 
-export async function buildCloneAnalyzeRequest(scene, allFrames) {
+export async function buildCloneAnalyzeRequest(scene, allFrames, contentStyle = "standard") {
   const sceneFrames = subsampleSceneFrames(getSceneFrames(allFrames, scene.debut, scene.fin));
-  const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts({
-    sceneNumber: scene.sceneNumber,
-    debut: scene.debut,
-    fin: scene.fin,
-    frameCount: sceneFrames.length,
-  });
+  const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts(
+    {
+      sceneNumber: scene.sceneNumber,
+      debut: scene.debut,
+      fin: scene.fin,
+      frameCount: sceneFrames.length,
+    },
+    contentStyle
+  );
   const sceneFrameImageUrls = await prepareSceneFrameImageUrls(
     sceneFrames.map((f) => f.dataUrl),
     scene.sceneNumber
@@ -26,6 +29,7 @@ export async function buildCloneAnalyzeRequest(scene, allFrames) {
     referenceDebutSec: scene.debut.timeSec,
     referenceFinSec: scene.fin.timeSec,
     veoOutputDurationSec: CLONE_VEO_SCENE_SECONDS,
+    contentStyle,
   };
 }
 

@@ -36,8 +36,8 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.profiles (id, email)
-  values (new.id, new.email)
+  insert into public.profiles (id, email, account_status)
+  values (new.id, new.email, 'pending')
   on conflict (id) do update
     set email = excluded.email,
         updated_at = now();

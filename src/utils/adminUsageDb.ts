@@ -1,7 +1,10 @@
 import { supabase } from "../supabase";
-import type { AiUsageLogEntry } from "./aiUsage";
-import { formatCostUsd, formatTokens } from "./aiUsage";
+import type { AiUsageLogEntry, AiUsageDaySummary } from "./aiUsage";
+import { formatCostUsd, formatTokens, daysElapsedThisMonth } from "./aiUsage";
 import type { DbUsageRow } from "./aiUsageDb";
+import { buildDailySummariesFromRows, buildDailySummariesByUser } from "./aiUsageDb";
+
+import type { AccountStatus } from "./profileDb.ts";
 
 export type AdminUserLimits = {
   dailyBudgetUsd: number | null;
@@ -13,10 +16,13 @@ export type AdminUserRow = {
   userId: string;
   email: string | null;
   isAdmin: boolean;
+  accountStatus: AccountStatus;
   limits: AdminUserLimits;
   today: { callCount: number; totalTokens: number; totalCostUsd: number };
   month: { callCount: number; totalTokens: number; totalCostUsd: number };
   lastCallAt: string | null;
+  /** Daily usage this calendar month (newest first). */
+  dailyThisMonth: AiUsageDaySummary[];
 };
 
 export type AdminUsageOverview = {
@@ -26,12 +32,18 @@ export type AdminUsageOverview = {
   totalCostUsd: number;
   users: AdminUserRow[];
   recentLogs: AiUsageLogEntry[];
+  /** All users combined — usage per day this month. */
+  platformDailyThisMonth: AiUsageDaySummary[];
 };
 
 export type AdminUserLimitsPatch = {
   dailyBudgetUsd?: number | null;
   dailyTokenLimit?: number | null;
   monthlyBudgetUsd?: number | null;
+};
+
+export type AdminUserStatusPatch = {
+  accountStatus: AccountStatus;
 };
 
 function rowToEntry(row: DbUsageRow): AiUsageLogEntry {
@@ -104,7 +116,7 @@ async function fetchAllProfiles() {
   const withLimits = await supabase
     .from("profiles")
     .select(
-      "id, email, is_admin, ai_daily_budget_usd, ai_daily_token_limit, ai_monthly_budget_usd"
+      "id, email, is_admin, account_status, ai_daily_budget_usd, ai_daily_token_limit, ai_monthly_budget_usd"
     )
     .order("email");
 
@@ -117,10 +129,16 @@ async function fetchAllProfiles() {
   if (basic.error) throw new Error(formatAdminFetchError(basic.error));
   return (basic.data ?? []).map((p) => ({
     ...p,
+    account_status: "active",
     ai_daily_budget_usd: null,
     ai_daily_token_limit: null,
     ai_monthly_budget_usd: null,
   }));
+}
+
+function parseAccountStatus(raw: unknown): AccountStatus {
+  if (raw === "active" || raw === "inactive" || raw === "pending") return raw;
+  return "pending";
 }
 
 export async function fetchAdminUsageOverview(limit = 80): Promise<AdminUsageOverview> {
@@ -160,6 +178,10 @@ export async function fetchAdminUsageOverview(limit = 80): Promise<AdminUsageOve
     todayByUser.set(row.owner_id, list);
   }
 
+  const monthDayCount = daysElapsedThisMonth();
+  const dailyByUser = buildDailySummariesByUser(monthLogs, monthDayCount);
+  const platformDailyThisMonth = buildDailySummariesFromRows(monthLogs, monthDayCount);
+
   const users: AdminUserRow[] = profiles.map((p) => {
     const monthRows = monthByUser.get(p.id) ?? [];
     const todayRows = todayByUser.get(p.id) ?? [];
@@ -175,6 +197,7 @@ export async function fetchAdminUsageOverview(limit = 80): Promise<AdminUsageOve
       userId: p.id,
       email: p.email as string | null,
       isAdmin: Boolean(p.is_admin),
+      accountStatus: parseAccountStatus(p.account_status),
       limits: {
         dailyBudgetUsd: numOrNull(p.ai_daily_budget_usd),
         dailyTokenLimit:
@@ -188,6 +211,7 @@ export async function fetchAdminUsageOverview(limit = 80): Promise<AdminUsageOve
         totalCostUsd: monthAgg.totalCostUsd,
       },
       lastCallAt: monthAgg.lastCallAt,
+      dailyThisMonth: dailyByUser.get(p.id) ?? buildDailySummariesFromRows([], monthDayCount),
     };
   });
 
@@ -205,6 +229,7 @@ export async function fetchAdminUsageOverview(limit = 80): Promise<AdminUsageOve
     totalCostUsd,
     users,
     recentLogs: monthLogs.slice(0, limit).map(rowToEntry),
+    platformDailyThisMonth,
   };
 }
 
@@ -226,6 +251,20 @@ export async function updateAdminUserLimits(
   }
 
   const { error } = await supabase.from("profiles").update(payload).eq("id", userId);
+  if (error) throw error;
+}
+
+export async function updateAdminUserStatus(
+  userId: string,
+  accountStatus: AccountStatus
+): Promise<void> {
+  const { error } = await supabase
+    .from("profiles")
+    .update({
+      account_status: accountStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
   if (error) throw error;
 }
 

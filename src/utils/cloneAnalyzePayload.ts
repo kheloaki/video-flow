@@ -2,6 +2,7 @@ import type { ExtractedFrame } from "./videoFrames";
 import { getSceneFrames, subsampleSceneFrames } from "./videoFrames";
 import { prepareSceneFrameImageUrls } from "./prepareVisionImageUrl";
 import { buildCloneDebutFinPrompts, CLONE_VEO_SCENE_SECONDS } from "./buildCloneFullScript";
+import type { CloneContentStyle } from "./cloneContentStyle";
 
 export type CloneAnalyzeRequestBody = {
   debutImageUrl: string;
@@ -15,6 +16,7 @@ export type CloneAnalyzeRequestBody = {
   referenceDebutSec: number;
   referenceFinSec: number;
   veoOutputDurationSec: number;
+  contentStyle?: CloneContentStyle;
 };
 
 /** Build analyze API body using every frame from scene debut → fin (subsampled if needed). */
@@ -24,15 +26,19 @@ export async function buildCloneAnalyzeRequest(
     debut: ExtractedFrame;
     fin: ExtractedFrame;
   },
-  allFrames: ExtractedFrame[]
+  allFrames: ExtractedFrame[],
+  contentStyle: CloneContentStyle = "standard"
 ): Promise<CloneAnalyzeRequestBody> {
   const sceneFrames = subsampleSceneFrames(getSceneFrames(allFrames, scene.debut, scene.fin));
-  const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts({
-    sceneNumber: scene.sceneNumber,
-    debut: scene.debut,
-    fin: scene.fin,
-    frameCount: sceneFrames.length,
-  });
+  const { debutPrompt, finPrompt } = buildCloneDebutFinPrompts(
+    {
+      sceneNumber: scene.sceneNumber,
+      debut: scene.debut,
+      fin: scene.fin,
+      frameCount: sceneFrames.length,
+    },
+    contentStyle
+  );
   const sceneFrameImageUrls = await prepareSceneFrameImageUrls(
     sceneFrames.map((f) => f.dataUrl),
     scene.sceneNumber
@@ -49,5 +55,6 @@ export async function buildCloneAnalyzeRequest(
     referenceDebutSec: scene.debut.timeSec,
     referenceFinSec: scene.fin.timeSec,
     veoOutputDurationSec: CLONE_VEO_SCENE_SECONDS,
+    contentStyle,
   };
 }

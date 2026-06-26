@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Coins, Loader2 } from "lucide-react";
+import { DailyUsageBreakdown, type DailyUsageRange } from "./components/DailyUsageBreakdown.tsx";
 import {
   fetchDailySummariesFromDb,
   fetchRecentUsageLogs,
@@ -10,6 +11,7 @@ import {
 } from "./utils/aiUsageDb.ts";
 import { formatUsageLine, type AiUsageDaySummary, type AiUsageLogEntry, AI_USAGE_DB_CHANGED_EVENT } from "./utils/aiUsage.ts";
 import { listCloneProjects, type CloneProject } from "./utils/cloneProjectDb.ts";
+import { PAGE_X } from "./utils/pageLayout.ts";
 
 type Props = {
   userId: string;
@@ -17,27 +19,10 @@ type Props = {
   onContinueClone?: (projectId: string) => void;
 };
 
-function DayRow({ s }: { s: AiUsageDaySummary }) {
-  const isToday = s.day === new Date().toISOString().slice(0, 10);
-  if (s.callCount === 0 && !isToday) return null;
-  return (
-    <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 last:border-0 text-sm">
-      <div>
-        <span className="font-medium text-gray-800">{isToday ? "Today" : s.day}</span>
-        <span className="text-gray-500 ml-2">
-          {s.callCount} call{s.callCount !== 1 ? "s" : ""}
-        </span>
-      </div>
-      <div className="text-right tabular-nums shrink-0">
-        <div className="font-semibold text-emerald-700">{formatCostUsd(s.totalCostUsd)}</div>
-        <div className="text-xs text-gray-500">{formatTokens(s.totalTokens)} tok</div>
-      </div>
-    </div>
-  );
-}
-
 export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
   const [loading, setLoading] = useState(true);
+  const [daysLoading, setDaysLoading] = useState(false);
+  const [rangeDays, setRangeDays] = useState<DailyUsageRange>(30);
   const [balance, setBalance] = useState<UsageBalanceSummary | null>(null);
   const [days, setDays] = useState<AiUsageDaySummary[]>([]);
   const [recent, setRecent] = useState<AiUsageLogEntry[]>([]);
@@ -48,14 +33,12 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const [bal, dayRows, logs, clones] = await Promise.all([
+      const [bal, logs, clones] = await Promise.all([
         fetchUsageBalance(userId),
-        fetchDailySummariesFromDb(userId, 30),
         fetchRecentUsageLogs(userId, 40),
         listCloneProjects(userId),
       ]);
       setBalance(bal);
-      setDays(dayRows);
       setRecent(logs);
       setCloneProjects(clones);
     } catch (e) {
@@ -75,10 +58,29 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
   }, [reload]);
 
   useEffect(() => {
-    const onDbChange = () => void reload();
+    let cancelled = false;
+    setDaysLoading(true);
+    void fetchDailySummariesFromDb(userId, rangeDays)
+      .then((dayRows) => {
+        if (!cancelled) setDays(dayRows);
+      })
+      .catch((e) => console.error("UsagePage daily load failed", e))
+      .finally(() => {
+        if (!cancelled) setDaysLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, rangeDays]);
+
+  useEffect(() => {
+    const onDbChange = () => {
+      void reload();
+      void fetchDailySummariesFromDb(userId, rangeDays).then(setDays).catch(() => {});
+    };
     window.addEventListener(AI_USAGE_DB_CHANGED_EVENT, onDbChange);
     return () => window.removeEventListener(AI_USAGE_DB_CHANGED_EVENT, onDbChange);
-  }, [reload]);
+  }, [reload, userId, rangeDays]);
 
   const hasLimits =
     balance &&
@@ -89,7 +91,7 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-16">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
+        <div className={`${PAGE_X} py-3 flex items-center gap-3`}>
           <button
             type="button"
             onClick={onBack}
@@ -104,7 +106,7 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+      <main className={`${PAGE_X} py-6 space-y-6`}>
         {error ? (
           <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-700 text-sm">
             {error}
@@ -146,6 +148,15 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
                 </p>
               </div>
             </div>
+
+            <DailyUsageBreakdown
+              days={days}
+              loading={daysLoading}
+              rangeDays={rangeDays}
+              onRangeChange={setRangeDays}
+              title="Usage by day"
+              description="See cost, tokens, and calls for each calendar day — expand a row for action breakdown."
+            />
 
             {hasLimits ? (
               <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm space-y-3">
@@ -211,15 +222,6 @@ export default function UsagePage({ userId, onBack, onContinueClone }: Props) {
                 </ul>
               </div>
             ) : null}
-
-            <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-              <h2 className="font-semibold text-gray-800 mb-3">Last 30 days</h2>
-              <div>
-                {days.map((s) => (
-                  <DayRow key={s.day} s={s} />
-                ))}
-              </div>
-            </div>
 
             <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
               <h2 className="font-semibold text-gray-800 mb-3">Recent API calls (saved)</h2>

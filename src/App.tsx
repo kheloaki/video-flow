@@ -39,7 +39,9 @@ import CloneVideoWorkspace from "./CloneVideoWorkspace.tsx";
 import UsagePage from "./UsagePage.tsx";
 import AdminUsagePage from "./AdminUsagePage.tsx";
 import { ProductHub } from "./components/ProductHub.tsx";
-import { ensureProfile, fetchIsAdmin } from "./utils/profileDb.ts";
+import { PAGE_X } from "./utils/pageLayout.ts";
+import { ensureProfile, fetchUserProfile, canUseApp, type UserProfile } from "./utils/profileDb.ts";
+import { AccountGate } from "./components/AccountGate.tsx";
 import { AiUsagePanel, AiUsageTodayBadge } from "./components/AiUsagePanel.tsx";
 import { recordAiUsageFromResponse, setUsagePersistContext } from "./utils/aiUsage.ts";
 import { clsx, type ClassValue } from 'clsx';
@@ -1697,6 +1699,8 @@ export default function App() {
   
   const [productView, setProductView] = useState<"hub" | "flow" | "clone" | "usage" | "admin">("hub");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [profileReady, setProfileReady] = useState(false);
   const [resumeCloneProjectId, setResumeCloneProjectId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
     "products" | "generate" | "saved" | "videoResult" | "veoResult" | "settings"
@@ -2265,16 +2269,27 @@ export default function App() {
   useEffect(() => {
     if (!user?.id) {
       setIsAdmin(false);
+      setUserProfile(null);
+      setProfileReady(true);
       return;
     }
     let cancelled = false;
+    setProfileReady(false);
     void (async () => {
       try {
         await ensureProfile(user.id, user.email);
-        const admin = await fetchIsAdmin(user.id);
-        if (!cancelled) setIsAdmin(admin);
+        const profile = await fetchUserProfile(user.id);
+        if (!cancelled) {
+          setUserProfile(profile);
+          setIsAdmin(profile?.is_admin === true);
+        }
       } catch {
-        if (!cancelled) setIsAdmin(false);
+        if (!cancelled) {
+          setUserProfile(null);
+          setIsAdmin(false);
+        }
+      } finally {
+        if (!cancelled) setProfileReady(true);
       }
     })();
     return () => {
@@ -4487,6 +4502,24 @@ ${b.styleExamplesBlock}`;
     );
   }
 
+  if (!profileReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+      </div>
+    );
+  }
+
+  if (userProfile && !canUseApp(userProfile)) {
+    return (
+      <AccountGate
+        status={userProfile.account_status}
+        email={user.email}
+        onLogout={() => void handleLogout()}
+      />
+    );
+  }
+
   if (productView === "hub") {
     return (
       <ProductHub
@@ -4552,7 +4585,7 @@ ${b.styleExamplesBlock}`;
       )}
       {dataSyncError && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 text-sm text-amber-950">
-          <div className="max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className={cn(PAGE_X, "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3")}>
             <div className="min-w-0">
               <p className="font-semibold">Ma-tchargawch l-data mn Supabase</p>
               <p className="text-amber-900/90 break-words mt-1">{dataSyncError}</p>
@@ -4572,7 +4605,7 @@ ${b.styleExamplesBlock}`;
       )}
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-3 sm:px-4 py-3 sm:py-0 sm:h-auto sm:min-h-16 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className={cn(PAGE_X, "py-3 sm:py-0 sm:h-auto sm:min-h-16 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between")}>
           <div className="flex items-center justify-between gap-2 min-w-0 sm:justify-start sm:shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <button
@@ -4634,7 +4667,7 @@ ${b.styleExamplesBlock}`;
         </div>
       </header>
 
-      <main className="w-full max-w-[1600px] mx-auto px-3 sm:px-4 py-4 sm:py-8 pb-24 sm:pb-8">
+      <main className={cn(PAGE_X, "py-4 sm:py-8 pb-24 sm:pb-8")}>
         {activeTab === 'products' && (
           <div className="space-y-8">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -5826,7 +5859,7 @@ ${b.styleExamplesBlock}`;
                     </div>
                   </div>
                 ) : generatedVideoUrl ? (
-                  <div className="space-y-6 w-full max-w-2xl">
+                  <div className="space-y-6 w-full">
                     <div className="bg-green-50 text-green-700 p-4 rounded-2xl flex items-center justify-center gap-2 font-medium">
                       <Check className="w-5 h-5" />
                       L-Video wjdat b-naja7!
@@ -6161,7 +6194,7 @@ ${b.styleExamplesBlock}`;
                 />
               </div>
             )}
-            <div className="flex-1 min-w-0 max-w-4xl mx-auto md:mx-0 space-y-8">
+            <div className="flex-1 min-w-0 space-y-8">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <h2 className="text-2xl font-bold flex items-center gap-2 flex-wrap min-w-0">
                 <Sparkles className="w-6 h-6 text-orange-500 shrink-0" />
@@ -6605,7 +6638,7 @@ ${b.styleExamplesBlock}`;
         )}
 
         {activeTab === "settings" && (
-          <div className="max-w-2xl mx-auto space-y-8 pb-12">
+          <div className="w-full space-y-8 pb-12">
             <div className="flex items-start gap-3">
               <div className="bg-orange-100 p-2 rounded-xl shrink-0">
                 <Settings className="w-6 h-6 text-orange-600" />

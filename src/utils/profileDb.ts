@@ -1,10 +1,25 @@
 import { supabase } from "../supabase";
 
+export type AccountStatus = "pending" | "active" | "inactive";
+
 export type UserProfile = {
   id: string;
   email: string | null;
   is_admin: boolean;
+  account_status: AccountStatus;
 };
+
+export function canUseApp(profile: UserProfile | null | undefined): boolean {
+  if (!profile) return false;
+  if (profile.is_admin) return true;
+  return profile.account_status === "active";
+}
+
+export function accountStatusLabel(status: AccountStatus): string {
+  if (status === "active") return "Active";
+  if (status === "inactive") return "Inactive";
+  return "Pending";
+}
 
 export async function ensureProfile(userId: string, email?: string | null): Promise<void> {
   const { error } = await supabase.from("profiles").upsert(
@@ -21,15 +36,18 @@ export async function ensureProfile(userId: string, email?: string | null): Prom
 export async function fetchUserProfile(userId: string): Promise<UserProfile | null> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, email, is_admin")
+    .select("id, email, is_admin, account_status")
     .eq("id", userId)
     .maybeSingle();
   if (error) throw error;
   if (!data) return null;
+  const status = data.account_status as AccountStatus;
   return {
     id: data.id,
     email: data.email,
     is_admin: Boolean(data.is_admin),
+    account_status:
+      status === "active" || status === "inactive" || status === "pending" ? status : "pending",
   };
 }
 

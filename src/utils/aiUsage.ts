@@ -113,6 +113,23 @@ export function recordAiUsageFromResponse(
   return recordAiUsage(data.usage, label);
 }
 
+export function formatUsageDayLabel(day: string): string {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  if (day === todayKey) return "Today";
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  if (day === y.toISOString().slice(0, 10)) return "Yesterday";
+  return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+export function daysElapsedThisMonth(): number {
+  return new Date().getDate();
+}
+
 export function getTodaySummary(): AiUsageDaySummary {
   return summarizeDay(todayKey());
 }

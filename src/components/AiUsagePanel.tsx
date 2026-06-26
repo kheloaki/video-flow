@@ -5,6 +5,7 @@ import {
   AI_USAGE_DB_CHANGED_EVENT,
   formatCostUsd,
   formatTokens,
+  formatUsageDayLabel,
   formatUsageLine,
   getRecentDailySummaries,
   getRecentEntries,
@@ -15,14 +16,11 @@ import {
 import { fetchUsageBalance } from "../utils/aiUsageDb";
 
 function DayRow({ s }: { s: AiUsageDaySummary }) {
-  const isToday = s.day === new Date().toISOString().slice(0, 10);
-  if (s.callCount === 0 && !isToday) return null;
+  if (s.callCount === 0) return null;
   return (
     <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 last:border-0 text-sm">
       <div>
-        <span className="font-medium text-gray-800">
-          {isToday ? "Today" : s.day}
-        </span>
+        <span className="font-medium text-gray-800">{formatUsageDayLabel(s.day)}</span>
         <span className="text-gray-500 ml-2">{s.callCount} call{s.callCount !== 1 ? "s" : ""}</span>
       </div>
       <div className="text-right tabular-nums shrink-0">

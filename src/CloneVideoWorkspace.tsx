@@ -20,13 +20,23 @@ import JSZip from "jszip";
 import { buildCloneFullScript, CLONE_LANGUAGE_LABEL, CLONE_VEO_SCENE_SECONDS } from "./utils/buildCloneFullScript";
 import { postAiJson } from "./utils/postAiJson";
 import { buildCloneAnalyzeRequest } from "./utils/cloneAnalyzePayload";
+import type { CloneContentStyle } from "./utils/cloneContentStyle";
 import { isAiUsagePayload, setUsagePersistContext, type AiUsagePayload } from "./utils/aiUsage";
 import { AiUsageCostChip, AiUsageTodayBadge } from "./components/AiUsagePanel";
 import {
-  FlowExtensionBar,
-  FlowExtensionSceneButton,
+  FlowQueueBar,
+  FlowQueueSceneButton,
   toFlowSceneExport,
-} from "./components/FlowExtensionBar";
+} from "./components/FlowQueueBar";
+import { CloneProjectHistory } from "./components/CloneProjectHistory";
+import { PAGE_X } from "./utils/pageLayout";
+import { saveCloneFrames, loadCloneFrames } from "./utils/cloneFrameStore";
+import {
+  CLONE_WIZARD_STEPS,
+  cloneProjectResumeStep,
+  isCloneStepReachable,
+  type CloneWizardStep,
+} from "./utils/cloneProjectHistory";
 import {
   createCloneProject,
   fetchCloneProject,
@@ -61,7 +71,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-type WizardStep = 1 | 2 | 3 | 4;
+type WizardStep = CloneWizardStep;
 
 type CloneScene = {
   sceneNumber: number;
@@ -90,7 +100,7 @@ type Props = {
   initialProjectId?: string | null;
 };
 
-const STEP_LABELS = ["Split video", "Scenes", "Analyze", "Veo prompts"] as const;
+const STEP_LABELS = CLONE_WIZARD_STEPS;
 
 type FlowSettings = {
   aspectRatio: string;
@@ -200,7 +210,7 @@ function ClonePipelineBoard({
 
   return (
     <div className="bg-white border-b border-gray-100">
-      <div className="max-w-5xl mx-auto px-4 py-3">
+      <div className={cn(PAGE_X, "py-3")}>
         <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Pipeline status</h2>
         <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
           {steps.map((s) => (
@@ -240,13 +250,34 @@ function sceneImageSrc(dataUrl: string, httpsUrl?: string): string {
   return dataUrl;
 }
 
-function frameFromMeta(meta: StoredFrameMeta, httpsUrl?: string): ExtractedFrame {
+function frameFromMeta(meta: StoredFrameMeta, src?: string): ExtractedFrame {
+  const dataUrl =
+    src?.startsWith("data:") || src?.startsWith("https://") ? src : PLACEHOLDER_FRAME;
   return {
     id: meta.id,
     index: meta.index,
     timeSec: meta.timeSec,
-    dataUrl: httpsUrl?.startsWith("https://") ? httpsUrl : PLACEHOLDER_FRAME,
+    dataUrl,
   };
+}
+
+function framesHaveRealData(frames: ExtractedFrame[]): boolean {
+  return frames.some((f) => f.dataUrl !== PLACEHOLDER_FRAME);
+}
+
+function buildRestoredFrames(
+  project: CloneProject,
+  storedFrames: Array<{ index: number; dataUrl: string }> = []
+): ExtractedFrame[] {
+  const srcByIndex = new Map<number, string>();
+  for (const row of storedFrames) {
+    if (row.dataUrl) srcByIndex.set(row.index, row.dataUrl);
+  }
+  for (const s of project.data.scenes) {
+    if (s.debutUrl?.startsWith("https://")) srcByIndex.set(s.debutIndex, s.debutUrl);
+    if (s.finUrl?.startsWith("https://")) srcByIndex.set(s.finIndex, s.finUrl);
+  }
+  return project.data.frameMeta.map((m) => frameFromMeta(m, srcByIndex.get(m.index)));
 }
 
 function scenesForFullScript(scenes: CloneScene[], allFrames: ExtractedFrame[]) {
@@ -330,21 +361,25 @@ function restoreCloneScene(stored: StoredCloneScene, frames: ExtractedFrame[]): 
   };
 }
 
-function applyProjectData(project: CloneProject): {
+function applyProjectData(
+  project: CloneProject,
+  storedFrames?: Array<{ index: number; dataUrl: string }>,
+  stepOverride?: WizardStep
+): {
   step: WizardStep;
   frames: ExtractedFrame[];
   scenes: CloneScene[];
   settings: Pick<
     CloneProjectData,
-    "extractMode" | "frameCount" | "intervalSec" | "sceneCount" | "boundaryIndices"
+    "extractMode" | "frameCount" | "intervalSec" | "sceneCount" | "boundaryIndices" | "contentStyle"
   >;
 } {
   const { data } = project;
-  const frames = data.frameMeta.map((m) => frameFromMeta(m));
+  const frames = buildRestoredFrames(project, storedFrames);
   const scenes = normalizeStuckSceneStatuses(
     data.scenes.map((s) => restoreCloneScene(s, frames))
   );
-  const step = Math.min(4, Math.max(1, project.step)) as WizardStep;
+  const step = stepOverride ?? (cloneProjectResumeStep(project) as WizardStep);
   return {
     step,
     frames,
@@ -355,6 +390,7 @@ function applyProjectData(project: CloneProject): {
       intervalSec: data.intervalSec,
       sceneCount: data.sceneCount,
       boundaryIndices: data.boundaryIndices,
+      contentStyle: data.contentStyle === "timelapse" ? "timelapse" : "standard",
     },
   };
 }
@@ -425,6 +461,7 @@ export default function CloneVideoWorkspace({
       return true;
     }
   });
+  const [contentStyle, setContentStyle] = useState<CloneContentStyle>("standard");
   const [visionLockBlocked, setVisionLockBlocked] = useState<VisionLockStatus | null>(null);
   const [flowSettings, setFlowSettings] = useState<FlowSettings>(loadFlowSettings);
   const toastTimer = useRef<number | null>(null);
@@ -483,6 +520,7 @@ export default function CloneVideoWorkspace({
         boundaryIndices,
         frameMeta: frames.map((f) => ({ id: f.id, index: f.index, timeSec: f.timeSec })),
         scenes: buildStoredScenes(scenesForSave),
+        contentStyle,
       };
       const status = projectStatus(opts.step, scenesForSave);
       const name =
@@ -490,6 +528,7 @@ export default function CloneVideoWorkspace({
         resumedSourceName?.replace(/\.[^.]+$/, "") ||
         "Clone project";
       try {
+        let savedId = projectId;
         if (projectId) {
           await updateCloneProject(projectId, userId, {
             step: opts.step,
@@ -506,7 +545,14 @@ export default function CloneVideoWorkspace({
             status,
             data,
           });
+          savedId = created.id;
           setProjectId(created.id);
+        }
+        if (savedId && framesHaveRealData(frames)) {
+          void saveCloneFrames(
+            savedId,
+            frames.map((f) => ({ index: f.index, dataUrl: f.dataUrl }))
+          ).catch((err) => console.warn("clone frame local save", err));
         }
         setSaveStatus("saved");
         window.setTimeout(() => setSaveStatus("idle"), 2000);
@@ -529,11 +575,32 @@ export default function CloneVideoWorkspace({
       frames,
       duration,
       projectId,
+      contentStyle,
     ]
   );
 
+  const canReachStep = useCallback(
+    (n: WizardStep): boolean => {
+      if (n === 1) return true;
+      if (n === 2) return frames.length > 0;
+      return scenes.length > 0;
+    },
+    [frames.length, scenes.length]
+  );
+
+  const goToStep = useCallback(
+    (next: WizardStep, opts?: { persist?: boolean }) => {
+      if (!canReachStep(next)) return;
+      setStep(next);
+      if (opts?.persist !== false && projectId && userId) {
+        void persistProject({ step: next });
+      }
+    },
+    [canReachStep, projectId, userId, persistProject]
+  );
+
   const loadSavedProject = useCallback(
-    async (id: string) => {
+    async (id: string, targetStep?: WizardStep) => {
       setError(null);
       setLoadingProjects(true);
       try {
@@ -542,10 +609,16 @@ export default function CloneVideoWorkspace({
           setError("Project ma-l9inach f DB.");
           return;
         }
-        const applied = applyProjectData(project);
+        const storedFrameRows = await loadCloneFrames(id);
+        const stepToOpen =
+          targetStep && isCloneStepReachable(project, targetStep) ? targetStep : undefined;
+        const applied = applyProjectData(project, storedFrameRows, stepToOpen);
         setProjectId(project.id);
         setResumedSourceName(project.sourceVideoName);
-        setNeedsVideoResync(true);
+        setNeedsVideoResync(
+          !framesHaveRealData(applied.frames) &&
+            (project.data.frameMeta.length > 0 || project.data.scenes.length > 0)
+        );
         setVideoFile(null);
         if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
         setVideoPreviewUrl(null);
@@ -555,6 +628,7 @@ export default function CloneVideoWorkspace({
         setIntervalSec(applied.settings.intervalSec);
         setSceneCount(applied.settings.sceneCount);
         setBoundaryIndices(applied.settings.boundaryIndices);
+        setContentStyle(applied.settings.contentStyle);
         setFrames(applied.frames);
         setScenes(applied.scenes);
         setStep(applied.step);
@@ -862,7 +936,7 @@ export default function CloneVideoWorkspace({
     try {
       await waitBeforeNextAnalyze();
       const s = next[i];
-      const payload = await buildCloneAnalyzeRequest(s, frames);
+      const payload = await buildCloneAnalyzeRequest(s, frames, contentStyle);
       const json = await postAiJson(
         "/api/ai/veo-scene-analyze",
         {
@@ -927,7 +1001,7 @@ export default function CloneVideoWorkspace({
         const s = workScenes[i];
         try {
           await waitBeforeNextAnalyze();
-          const payload = await buildCloneAnalyzeRequest(s, frames);
+          const payload = await buildCloneAnalyzeRequest(s, frames, contentStyle);
           const json = await postAiJson(
             "/api/ai/veo-scene-analyze",
             {
@@ -1018,7 +1092,7 @@ export default function CloneVideoWorkspace({
 
     const refDuration =
       duration > 0 ? duration : (next[next.length - 1]?.fin.timeSec ?? 0);
-    const fullScript = buildCloneFullScript(scenesForFullScript(next, frames), refDuration);
+    const fullScript = buildCloneFullScript(scenesForFullScript(next, frames), refDuration, contentStyle);
 
     try {
       const s = next[i];
@@ -1030,6 +1104,7 @@ export default function CloneVideoWorkspace({
           imageAnalysis: s.analysis,
           languageLabel: CLONE_LANGUAGE_LABEL,
           workflowMode: "clone",
+          contentStyle,
         },
         180_000,
         `Clone Veo package — Scene ${s.sceneNumber}`
@@ -1055,7 +1130,7 @@ export default function CloneVideoWorkspace({
 
     const refDuration =
       duration > 0 ? duration : (workScenes[workScenes.length - 1]?.fin.timeSec ?? 0);
-    const fullScript = buildCloneFullScript(scenesForFullScript(workScenes, frames), refDuration);
+    const fullScript = buildCloneFullScript(scenesForFullScript(workScenes, frames), refDuration, contentStyle);
 
     const next = workScenes.map((s) => ({ ...s }));
     const targets = next
@@ -1094,6 +1169,7 @@ export default function CloneVideoWorkspace({
             imageAnalysis: s.analysis,
             languageLabel: CLONE_LANGUAGE_LABEL,
             workflowMode: "clone",
+            contentStyle,
           },
           180_000,
           `Clone Veo package — Scene ${s.sceneNumber}`
@@ -1139,7 +1215,7 @@ export default function CloneVideoWorkspace({
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-24">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
+        <div className={cn(PAGE_X, "py-3 flex items-center gap-3")}>
           <button
             type="button"
             onClick={onBack}
@@ -1174,21 +1250,32 @@ export default function CloneVideoWorkspace({
             </button>
           ) : null}
         </div>
-        <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-wrap gap-2">
+        <div className={cn(PAGE_X, "pb-3 flex flex-wrap gap-2")}>
           {STEP_LABELS.map((label, i) => {
             const n = (i + 1) as WizardStep;
             const active = step === n;
             const done = step > n;
+            const reachable = canReachStep(n);
             return (
-              <div
+              <button
+                type="button"
                 key={label}
+                disabled={!reachable}
+                onClick={() => goToStep(n)}
+                title={
+                  reachable
+                    ? `Go to step ${n}: ${label}`
+                    : `Step ${n} — complete earlier steps first`
+                }
                 className={cn(
-                  "flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border",
-                  active
-                    ? "bg-violet-600 text-white border-violet-600"
-                    : done
-                      ? "bg-violet-50 text-violet-800 border-violet-200"
-                      : "bg-gray-50 text-gray-500 border-gray-200"
+                  "flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition-colors",
+                  !reachable
+                    ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
+                    : active
+                      ? "bg-violet-600 text-white border-violet-600"
+                      : done
+                        ? "bg-violet-50 text-violet-800 border-violet-200 hover:bg-violet-100"
+                        : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-violet-50 hover:border-violet-200"
                 )}
               >
                 <span>{n}</span>
@@ -1196,11 +1283,19 @@ export default function CloneVideoWorkspace({
                 {i < STEP_LABELS.length - 1 ? (
                   <ChevronRight className="w-3 h-3 opacity-40 hidden sm:block" />
                 ) : null}
-              </div>
+              </button>
             );
           })}
         </div>
       </header>
+
+      <CloneProjectHistory
+        projects={savedProjects}
+        loading={loadingProjects}
+        activeProjectId={projectId}
+        activeStep={step}
+        onOpen={(id, targetStep) => void loadSavedProject(id, targetStep)}
+      />
 
       <ClonePipelineBoard
         videoName={videoFile?.name ?? resumedSourceName}
@@ -1213,7 +1308,7 @@ export default function CloneVideoWorkspace({
         autoPipeline={autoPipeline}
       />
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+      <main className={cn(PAGE_X, "py-6 space-y-6 w-full")}>
         {needsVideoResync && projectId ? (
           <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl text-sm text-amber-900 space-y-3">
             <p>
@@ -1247,41 +1342,6 @@ export default function CloneVideoWorkspace({
                 </button>
               ) : null}
             </div>
-          </div>
-        ) : null}
-
-        {savedProjects.length > 0 ? (
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 space-y-3">
-            <h2 className="font-semibold text-gray-800">Saved clone projects</h2>
-            {loadingProjects ? (
-              <p className="text-sm text-gray-500 flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-              </p>
-            ) : (
-              <ul className="space-y-2 max-h-56 overflow-y-auto">
-                {savedProjects.map((p) => (
-                  <li
-                    key={p.id}
-                    className="flex flex-wrap items-center justify-between gap-2 p-3 bg-gray-50 rounded-xl border border-gray-100"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-medium text-gray-900 truncate">{p.name}</div>
-                      <div className="text-xs text-gray-500">
-                        Step {p.step} · {p.data.scenes.length} scene(s) ·{" "}
-                        {new Date(p.updatedAt).toLocaleString()}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void loadSavedProject(p.id)}
-                      className="shrink-0 text-sm font-semibold text-violet-700 hover:underline"
-                    >
-                      Continue →
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
         ) : null}
 
@@ -1426,6 +1486,52 @@ export default function CloneVideoWorkspace({
                   </label>
                 </div>
               </div>
+
+              <fieldset className="space-y-2">
+                <legend className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                  Video style
+                </legend>
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors",
+                    contentStyle === "standard" ? "border-violet-400 bg-violet-50" : "border-gray-200 bg-gray-50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="contentStyle"
+                    className="mt-1 accent-violet-600"
+                    checked={contentStyle === "standard"}
+                    onChange={() => setContentStyle("standard")}
+                  />
+                  <span className="text-sm">
+                    <span className="font-semibold block">Standard clone</span>
+                    <span className="text-gray-500 text-xs">
+                      Match reference pacing — action sounds only (no music)
+                    </span>
+                  </span>
+                </label>
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors",
+                    contentStyle === "timelapse" ? "border-violet-400 bg-violet-50" : "border-gray-200 bg-gray-50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="contentStyle"
+                    className="mt-1 accent-violet-600"
+                    checked={contentStyle === "timelapse"}
+                    onChange={() => setContentStyle("timelapse")}
+                  />
+                  <span className="text-sm">
+                    <span className="font-semibold block">Timelapse / progression</span>
+                    <span className="text-gray-500 text-xs">
+                      Construction, assembly, fast-forward build — step-by-step beats, action SFX only
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
 
               <fieldset className="space-y-2">
                 <legend className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
@@ -1712,7 +1818,7 @@ export default function CloneVideoWorkspace({
             {scenes.every((s) => s.analyzeStatus === "done") ? (
               <button
                 type="button"
-                onClick={() => setStep(4)}
+                onClick={() => goToStep(4)}
                 className="w-full py-3 bg-gray-900 text-white font-bold rounded-xl"
               >
                 Suivant: Veo prompts →
@@ -1743,7 +1849,12 @@ export default function CloneVideoWorkspace({
                 Use <strong>Regenerate</strong> on each scene card for one scene at a time. Full JSON
                 package is saved to your project in the database.
               </p>
-              <FlowExtensionBar scenes={flowExportScenes} disabled={isGenerating} />
+              <FlowQueueBar
+                userId={userId}
+                projectId={projectId}
+                scenes={flowExportScenes}
+                disabled={isGenerating}
+              />
             </div>
             {scenes.map((s) => {
               const displayPkg: Record<string, unknown> = {
@@ -1788,7 +1899,9 @@ export default function CloneVideoWorkspace({
                     <Download className="w-4 h-4" />
                     ZIP debut + fin
                   </button>
-                    <FlowExtensionSceneButton
+                    <FlowQueueSceneButton
+                      userId={userId}
+                      projectId={projectId}
                       scene={toFlowSceneExport(
                         s.sceneNumber,
                         sceneImageSrc(s.debut.dataUrl, s.debutUrl),

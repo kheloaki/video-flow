@@ -52,7 +52,7 @@ async function analyzeSceneAtIndex(meta, index, frameByIndex, allFrames, apiBase
       frameByIndex,
       allFrames
     );
-    const payload = await buildCloneAnalyzeRequest(scene, framesList);
+    const payload = await buildCloneAnalyzeRequest(scene, framesList, meta.contentStyle === "timelapse" ? "timelapse" : "standard");
     const json = await postAiJson(
       "/api/ai/veo-scene-analyze",
       {

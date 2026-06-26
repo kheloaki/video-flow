@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Video Flow Workspace",
-  "version": "2.8.1",
-  "description": "Sidebar workspace: Clone Video + Google Flow fill — Supabase projects, no web app required.",
+  "version": "2.9.0",
+  "description": "Sidebar workspace: Clone Video + Google Flow fill — Supabase projects & queue, no web app required.",
   "permissions": ["storage", "tabs", "scripting", "cookies", "sidePanel", "clipboardWrite"],
   "host_permissions": [
     "https://labs.google/*",
@@ -23,15 +23,6 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "http://localhost/*",
-        "http://127.0.0.1/*",
-        "https://*.vercel.app/*"
-      ],
-      "js": ["content-app.js"],
-      "run_at": "document_idle"
-    },
-    {
       "matches": ["https://labs.google/*"],
       "js": ["flow-dom.js", "flow-edit-picker.js", "content-flow.js"],
       "css": ["flow-edit-picker.css"],
@@ -43,12 +34,5 @@
       "resources": ["flow-edit-picker.css"],
       "matches": ["https://labs.google/*"]
     }
-  ],
-  "externally_connectable": {
-    "matches": [
-      "http://localhost/*",
-      "http://127.0.0.1/*",
-      "https://*.vercel.app/*"
-    ]
-  }
+  ]
 }

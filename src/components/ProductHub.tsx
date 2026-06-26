@@ -2,6 +2,7 @@ import { Clapperboard, Coins, LogOut, Shield, Sparkles } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { AiUsageTodayBadge } from "./AiUsagePanel";
+import { PAGE_X } from "../utils/pageLayout";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -31,7 +32,7 @@ export function ProductHub({
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans">
       <header className="bg-white border-b border-gray-200">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div className={cn(PAGE_X, "py-4 flex items-center justify-between")}>
           <div className="flex items-center gap-2 flex-wrap">
             <div className="bg-orange-500 p-1.5 rounded-lg">
               <Sparkles className="w-5 h-5 text-white" />
@@ -50,7 +51,7 @@ export function ProductHub({
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-10 sm:py-16">
+      <main className={cn(PAGE_X, "py-10 sm:py-16")}>
         <div className="text-center mb-10">
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Chno bghiti t-dir?</h1>
           {userEmail ? (

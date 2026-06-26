@@ -36,6 +36,8 @@ export type CloneProjectData = {
   boundaryIndices: number[];
   frameMeta: StoredFrameMeta[];
   scenes: StoredCloneScene[];
+  /** Timelapse vs standard clone — affects vision + Veo prompts. */
+  contentStyle?: "standard" | "timelapse";
 };
 
 export type CloneProject = {
@@ -60,6 +62,7 @@ function mapRow(row: Record<string, unknown>): CloneProject {
     boundaryIndices: [],
     frameMeta: [],
     scenes: [],
+    contentStyle: "standard",
   };
   return {
     id: row.id as string,

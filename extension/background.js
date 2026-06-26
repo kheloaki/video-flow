@@ -1,6 +1,12 @@
 import { runAnalyzeJob, getAnalyzeJobStatus, stopAnalyzeJob } from "./lib/analyze-runner.js";
 import { saveEditClips } from "./lib/edit-clip-store.js";
 import {
+  appendFlowQueueItem,
+  clearFlowQueueDb,
+  fetchFlowQueueItems,
+  syncFlowQueueItems,
+} from "./lib/flow-queue-db.js";
+import {
   detectVideoMime,
   isVideoBuffer,
   normalizeArrayBuffer,
@@ -20,7 +26,7 @@ const BATCH_PAUSE_MS = 4000;
 let batchRunId = 0;
 
 function queueItemId(q, idx = 0) {
-  return String(q.queuedAt ?? `scene-${q.sceneNumber ?? idx}`);
+  return String(q.id ?? q.queuedAt ?? `scene-${q.sceneNumber ?? idx}`);
 }
 
 async function getQueueSelectionSet() {
@@ -49,12 +55,26 @@ async function getQueueBatchStatus() {
 }
 
 async function getQueue() {
+  try {
+    const fromDb = await fetchFlowQueueItems();
+    if (fromDb !== null) {
+      await chrome.storage.local.set({ [QUEUE_KEY]: fromDb });
+      return fromDb;
+    }
+  } catch (e) {
+    console.warn("[vf] flow queue DB fetch failed:", e);
+  }
   const data = await chrome.storage.local.get(QUEUE_KEY);
   return Array.isArray(data[QUEUE_KEY]) ? data[QUEUE_KEY] : [];
 }
 
 async function setQueue(queue) {
   await chrome.storage.local.set({ [QUEUE_KEY]: queue });
+  try {
+    await syncFlowQueueItems(queue);
+  } catch (e) {
+    console.warn("[vf] flow queue DB sync failed:", e);
+  }
 }
 
 function sleep(ms) {
@@ -332,32 +352,6 @@ async function runSelectedQueueBatch() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   void (async () => {
     try {
-      if (msg.type === "VF_AUTH_SESSION") {
-        const p = msg.payload;
-        await chrome.storage.local.set({
-          vf_supabase_session: {
-            accessToken: p.accessToken,
-            refreshToken: p.refreshToken,
-            userId: p.userId,
-            email: p.email,
-            savedAt: Date.now(),
-          },
-        });
-        if (p.supabaseUrl || p.supabaseAnonKey) {
-          const existing = await chrome.storage.sync.get("vf_supabase_config");
-          const cfg = existing.vf_supabase_config ?? {};
-          await chrome.storage.sync.set({
-            vf_supabase_config: {
-              ...cfg,
-              ...(p.supabaseUrl ? { url: p.supabaseUrl } : {}),
-              ...(p.supabaseAnonKey ? { anonKey: p.supabaseAnonKey } : {}),
-            },
-          });
-        }
-        sendResponse({ ok: true });
-        return;
-      }
-
       if (msg.type === "VF_LEXICAL_SET_PROMPT") {
         const tabId = _sender.tab?.id;
         if (!tabId) {
@@ -493,15 +487,35 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       if (msg.type === "VF_QUEUE_SCENE") {
+        const item = { ...msg.payload, queuedAt: Date.now() };
+        try {
+          const appended = await appendFlowQueueItem(item);
+          if (appended) {
+            const queue = await getQueue();
+            sendResponse({ ok: true, queueLength: queue.length });
+            return;
+          }
+        } catch (e) {
+          sendResponse({
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          return;
+        }
         const queue = await getQueue();
-        queue.push({ ...msg.payload, queuedAt: Date.now() });
-        await setQueue(queue);
+        queue.push(item);
+        await chrome.storage.local.set({ [QUEUE_KEY]: queue });
         sendResponse({ ok: true, queueLength: queue.length });
         return;
       }
 
       if (msg.type === "VF_CLEAR_QUEUE") {
         batchRunId += 1;
+        try {
+          await clearFlowQueueDb();
+        } catch {
+          /* offline / not signed in */
+        }
         await setQueue([]);
         await chrome.storage.local.set({
           [QUEUE_BATCH_KEY]: { running: false, stopRequested: true, stoppedAt: Date.now() },

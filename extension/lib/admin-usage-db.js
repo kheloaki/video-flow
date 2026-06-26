@@ -44,7 +44,7 @@ export async function fetchAdminUsageOverview() {
 
   const [profilesRes, monthLogsRes, todayLogsRes] = await Promise.all([
     fetch(
-      `${url}/rest/v1/profiles?select=id,email,is_admin,ai_daily_budget_usd,ai_daily_token_limit,ai_monthly_budget_usd&order=email`,
+      `${url}/rest/v1/profiles?select=id,email,is_admin,account_status,ai_daily_budget_usd,ai_daily_token_limit,ai_monthly_budget_usd&order=email`,
       { headers }
     ),
     fetch(
@@ -97,6 +97,7 @@ export async function fetchAdminUsageOverview() {
       userId: p.id,
       email: p.email,
       isAdmin: Boolean(p.is_admin),
+      accountStatus: p.account_status === "active" || p.account_status === "inactive" ? p.account_status : "pending",
       limits: {
         dailyBudgetUsd: numOrNull(p.ai_daily_budget_usd),
         dailyTokenLimit: p.ai_daily_token_limit != null ? Number(p.ai_daily_token_limit) : null,
@@ -146,6 +147,25 @@ export async function updateAdminUserLimits(userId, patch) {
   });
   if (res.status === 403) {
     throw new Error("Admin update denied — run supabase/admin_user_limits.sql");
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text.slice(0, 200) || `HTTP ${res.status}`);
+  }
+}
+
+export async function updateAdminUserStatus(userId, accountStatus) {
+  const { headers, url } = await adminHeaders();
+  const res = await fetch(`${url}/rest/v1/profiles?id=eq.${userId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      account_status: accountStatus,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  if (res.status === 403) {
+    throw new Error("Admin update denied — check is_admin on your profile.");
   }
   if (!res.ok) {
     const text = await res.text();

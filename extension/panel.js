@@ -27,10 +27,24 @@ import {
   listCloneProjects,
   fetchCloneProject,
 } from "./lib/clone-db.js";
+import {
+  cloneProjectSummary,
+  cloneProjectStepLabel,
+  cloneProjectThumb,
+  cloneProjectResumeStep,
+  cloneProjectStepDone,
+  isCloneStepReachable,
+  formatRelativeTime,
+} from "./lib/clone-project-history.js";
 import { getFlowSettings, setFlowSettings } from "./lib/flow-settings.js";
 import { buildFlowPromptJson, buildFlowScenePayload } from "./lib/flow-prompt.js";
-import { fetchIsAdmin } from "./lib/profile-db.js";
-import { fetchAdminUsageOverview, formatCostUsd as adminFormatCost, updateAdminUserLimits } from "./lib/admin-usage-db.js";
+import { fetchIsAdmin, fetchUserProfile, canUseApp } from "./lib/profile-db.js";
+import {
+  fetchAdminUsageOverview,
+  formatCostUsd as adminFormatCost,
+  updateAdminUserLimits,
+  updateAdminUserStatus,
+} from "./lib/admin-usage-db.js";
 import {
   isAiUsagePayload,
   insertUsageLog,
@@ -79,11 +93,14 @@ const state = {
   queueBatchPoll: null,
   editClips: [],
   autoPipeline: true,
+  contentStyle: "standard",
   promptsAutoTriggered: false,
   isAdmin: false,
   isGeneratingPrompts: false,
   visionLockBlocked: null,
   needsVideoResync: false,
+  canUseApp: true,
+  accountStatus: "active",
 };
 
 let persistTimer = null;
@@ -122,6 +139,7 @@ function buildCloneProjectData() {
     intervalSec: String(state.intervalSec),
     sceneCount: String(state.sceneCount),
     boundaryIndices: state.boundaryIndices,
+    contentStyle: state.contentStyle,
     frameMeta: state.frames.map((f) => ({ id: f.id, index: f.index, timeSec: f.timeSec })),
     scenes: state.scenes.map(cloneSceneToStored),
   };
@@ -169,6 +187,7 @@ async function persistAll() {
     boundaryIndices: state.boundaryIndices,
     videoName: state.videoName,
     dbProjectId: state.dbProjectId,
+    contentStyle: state.contentStyle,
     scenes: state.scenes.map(cloneSceneToStored),
   };
 
@@ -179,7 +198,7 @@ async function persistAll() {
   state.projectId = frameKey;
   updateDbBadge("local");
 
-  if (!(await isLoggedIn()) || !state.frames.length) return;
+  if (!(await isLoggedIn()) || !state.canUseApp || !state.frames.length) return;
 
   try {
     const data = buildCloneProjectData();
@@ -218,6 +237,13 @@ async function persistAll() {
     updateDbBadge("db");
     const el = $("#saveStatus");
     if (el) el.textContent = `Saved to DB · ${new Date().toLocaleTimeString()}`;
+    if (await isLoggedIn()) {
+      try {
+        renderCloneHistory(await listCloneProjects());
+      } catch {
+        /* optional */
+      }
+    }
   } catch (e) {
     const el = $("#saveStatus");
     if (el) el.textContent = `DB: ${e.message}`;
@@ -236,6 +262,7 @@ async function restoreFromMeta(meta, frameRows) {
   state.intervalSec = meta.intervalSec ?? 1;
   state.sceneCount = meta.sceneCount ?? 6;
   state.boundaryIndices = meta.boundaryIndices ?? [];
+  state.contentStyle = meta.contentStyle === "timelapse" ? "timelapse" : "standard";
   state.videoName = meta.videoName ?? null;
   state.dbProjectId = meta.dbProjectId ?? null;
   if (meta.videoName) $("#videoLabel").textContent = meta.videoName;
@@ -461,7 +488,7 @@ async function loadDraft() {
   showStatus("Project restored.");
 }
 
-async function loadProjectFromDb(dbId) {
+async function loadProjectFromDb(dbId, targetStep) {
   const project = await fetchCloneProject(dbId);
   if (!project) return;
   state.dbProjectId = project.id;
@@ -473,6 +500,7 @@ async function loadProjectFromDb(dbId) {
   state.intervalSec = Number(project.data.intervalSec) || 1;
   state.sceneCount = Number(project.data.sceneCount) || 6;
   state.boundaryIndices = project.data.boundaryIndices ?? [];
+  state.contentStyle = project.data.contentStyle === "timelapse" ? "timelapse" : "standard";
 
   const frameRows = await loadFrames(project.id);
   state.frames = frameRows.map((r) => ({
@@ -481,20 +509,20 @@ async function loadProjectFromDb(dbId) {
     timeSec: 0,
     dataUrl: r.dataUrl,
   }));
-  state.needsVideoResync = frameRows.length === 0;
+  state.needsVideoResync = frameRows.length === 0 && (project.data.frameMeta?.length ?? 0) > 0;
 
   state.scenes = (project.data.scenes ?? []).map((s) => {
     const debut = state.frames[s.debutIndex] ?? {
       id: `d-${s.sceneNumber}`,
       index: s.debutIndex,
       timeSec: s.debutTimeSec,
-      dataUrl: "",
+      dataUrl: s.debutUrl?.startsWith("https://") ? s.debutUrl : "",
     };
     const fin = state.frames[s.finIndex] ?? {
       id: `f-${s.sceneNumber}`,
       index: s.finIndex,
       timeSec: s.finTimeSec,
-      dataUrl: "",
+      dataUrl: s.finUrl?.startsWith("https://") ? s.finUrl : "",
     };
     debut.timeSec = s.debutTimeSec;
     fin.timeSec = s.finTimeSec;
@@ -518,7 +546,11 @@ async function loadProjectFromDb(dbId) {
     };
   });
 
-  goStep(Math.min(4, Math.max(1, project.step)), { skipPersist: true });
+  let step = cloneProjectResumeStep(project);
+  if (targetStep && isCloneStepReachable(project, targetStep)) {
+    step = Math.min(4, Math.max(1, targetStep));
+  }
+  goStep(step, { skipPersist: true });
   renderFrames();
   renderScenes();
   await chrome.storage.local.set({
@@ -543,6 +575,13 @@ async function loadProjectFromDb(dbId) {
     );
   } else {
     showStatus(`Loaded from DB: ${project.name}`);
+  }
+  if (await isLoggedIn()) {
+    try {
+      renderCloneHistory(await listCloneProjects());
+    } catch {
+      /* optional */
+    }
   }
 }
 
@@ -600,28 +639,125 @@ function updateDbBadge(mode) {
   }
 }
 
-async function renderCloneSavedProjects(projects) {
-  const box = $("#cloneSavedProjects");
-  if (!box) return;
+function renderCloneHistory(projects) {
+  const section = $("#cloneHistory");
+  if (!section) return;
   if (!projects?.length) {
-    box.classList.add("hidden");
-    box.innerHTML = "";
+    section.classList.add("hidden");
+    section.innerHTML = "";
     return;
   }
-  box.classList.remove("hidden");
-  box.innerHTML = `
-    <p class="label">Saved projects (Supabase)</p>
-    <div class="saved-project-buttons">
+  section.classList.remove("hidden");
+  const activeId = state.dbProjectId;
+  section.innerHTML = `
+    <div class="clone-history-head">
+      <div>
+        <h2>Recent videos</h2>
+        <p>Continue a saved clone project</p>
+      </div>
+      <span class="clone-history-count">${projects.length} saved</span>
+    </div>
+    <div class="clone-history-track">
       ${projects
-        .map(
-          (p) =>
-            `<button type="button" class="btn secondary sm" data-id="${p.id}">${escapeHtml(p.name)} · step ${p.step}</button>`
-        )
+        .map((p) => {
+          const thumb = cloneProjectThumb(p);
+          const isActive = activeId === p.id;
+          const timelapse =
+            p.data?.contentStyle === "timelapse"
+              ? `<span class="clone-history-badge">Timelapse</span>`
+              : "";
+          const cost =
+            p.totalCostUsd > 0
+              ? ` · <span style="color:var(--green)">${escapeHtml(formatCostUsd(p.totalCostUsd))}</span>`
+              : "";
+          return `
+        <article class="clone-history-card ${isActive ? "active" : ""}" data-id="${p.id}">
+          <div class="clone-history-thumb">
+            ${
+              thumb
+                ? `<img src="${escapeHtml(thumb)}" alt="" />`
+                : `<div class="placeholder">🎬</div>`
+            }
+            <div class="clone-history-badges">
+              <span class="clone-history-badge">${escapeHtml(p.status || "draft")}</span>
+              ${timelapse}
+            </div>
+          </div>
+          <div class="clone-history-body">
+            <h3 title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</h3>
+            ${
+              p.sourceVideoName
+                ? `<div class="clone-history-sub">${escapeHtml(p.sourceVideoName)}</div>`
+                : ""
+            }
+            <div class="clone-history-meta">${escapeHtml(cloneProjectSummary(p))}</div>
+            <div class="clone-history-sub">${escapeHtml(cloneProjectStepLabel(cloneProjectResumeStep(p)))} · ${escapeHtml(formatRelativeTime(p.updatedAt))}${cost}</div>
+            <div class="clone-history-steps" role="group" aria-label="Jump to step">
+              ${[1, 2, 3, 4]
+                .map((stepNum) => {
+                  const reachable = isCloneStepReachable(p, stepNum);
+                  const done = cloneProjectStepDone(p, stepNum);
+                  const isCurrent = isActive && state.step === stepNum;
+                  const cls = !reachable
+                    ? "disabled"
+                    : isCurrent
+                      ? "current"
+                      : done
+                        ? "done"
+                        : "";
+                  return `<button type="button" class="clone-history-step ${cls}" data-id="${p.id}" data-step="${stepNum}" ${
+                    reachable ? "" : "disabled"
+                  } title="Step ${stepNum}">${stepNum}</button>`;
+                })
+                .join("")}
+            </div>
+            <button type="button" class="btn ${isActive ? "primary" : "secondary"} sm clone-history-open" data-id="${p.id}" data-step="${cloneProjectResumeStep(p)}">
+              ${isActive ? "Current project" : "Continue"}
+            </button>
+          </div>
+        </article>`;
+        })
         .join("")}
     </div>`;
-  box.querySelectorAll("button[data-id]").forEach((btn) => {
-    btn.addEventListener("click", () => void loadProjectFromDb(btn.dataset.id));
+  section.querySelectorAll(".clone-history-open").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const step = btn.dataset.step ? Number(btn.dataset.step) : undefined;
+      void loadProjectFromDb(btn.dataset.id, step);
+    });
   });
+  section.querySelectorAll(".clone-history-step:not([disabled])").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      void loadProjectFromDb(btn.dataset.id, Number(btn.dataset.step));
+    });
+  });
+}
+
+function renderAccountGate(profile) {
+  const gate = $("#accountGate");
+  const scroll = document.querySelector(".panel-scroll");
+  if (!gate) return;
+  const allowed = canUseApp(profile);
+  state.canUseApp = allowed;
+  state.accountStatus = profile?.account_status ?? "pending";
+  if (scroll) scroll.classList.toggle("panel-blocked", !allowed);
+  if (allowed) {
+    gate.classList.add("hidden");
+    gate.innerHTML = "";
+    return;
+  }
+  const pending = profile?.account_status === "pending";
+  gate.classList.remove("hidden");
+  gate.innerHTML = `
+    <div class="account-gate-card">
+      <h2>${pending ? "Account pending approval" : "Account inactive"}</h2>
+      <p>${
+        pending
+          ? "An admin must set your account to Active before you can use Clone Video, AI, and saved projects."
+          : "Your account is inactive. Ask an admin to reactivate you."
+      }</p>
+      <button type="button" class="btn secondary sm" id="btnAccountSignOut">Sign out</button>
+    </div>`;
+  $("#btnAccountSignOut")?.addEventListener("click", () => void signOut().then(() => refreshAuthUi()));
 }
 
 async function refreshAuthUi() {
@@ -649,17 +785,19 @@ async function refreshAuthUi() {
 
   await refreshUsageBadge();
   state.isAdmin = loggedIn ? await fetchIsAdmin() : false;
+  const profile = loggedIn ? await fetchUserProfile() : null;
+  renderAccountGate(profile);
   const adminTab = $("#tabAdminBtn");
   if (adminTab) adminTab.classList.toggle("hidden", !state.isAdmin);
   const projectsBox = $("#savedProjects");
   if (!loggedIn) {
     if (projectsBox) projectsBox.innerHTML = "";
-    await renderCloneSavedProjects(null);
+    renderCloneHistory(null);
     return;
   }
   try {
     const projects = await listCloneProjects();
-    await renderCloneSavedProjects(projects);
+    renderCloneHistory(projects);
     const box = $("#savedProjects");
     if (!projects.length) {
       box.innerHTML = "<p class='muted'>No DB projects yet.</p>";
@@ -676,8 +814,9 @@ async function refreshAuthUi() {
     });
   } catch (e) {
     $("#savedProjects").innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
-    await renderCloneSavedProjects(null);
+    renderCloneHistory(null);
   }
+  if (loggedIn) void refreshQueue();
 }
 
 function showStatus(msg, type = "ok") {
@@ -701,17 +840,26 @@ async function saveDraft() {
   schedulePersist();
 }
 
+function canReachStep(n) {
+  if (n === 1) return true;
+  if (n === 2) return state.frames.length > 0;
+  return state.scenes.length > 0;
+}
+
 function renderStepNav() {
   const nav = $("#stepNav");
   nav.innerHTML = STEP_LABELS.map((label, i) => {
     const n = i + 1;
     const cls = state.step === n ? "active" : state.step > n ? "done" : "";
-    return `<button type="button" class="step-pill ${cls}" data-step="${n}">${n}. ${label}</button>`;
+    const reachable = canReachStep(n);
+    return `<button type="button" class="step-pill ${cls}${reachable ? "" : " locked"}" data-step="${n}" ${
+      reachable ? "" : "disabled"
+    } title="${reachable ? `Go to step ${n}` : "Complete earlier steps first"}">${n}. ${label}</button>`;
   }).join("");
   nav.querySelectorAll(".step-pill").forEach((btn) => {
     btn.addEventListener("click", () => {
       const n = Number(btn.dataset.step);
-      if (n <= state.step || state.frames.length) goStep(n);
+      if (canReachStep(n)) goStep(n);
     });
   });
   renderPipelineBoard();
@@ -753,6 +901,23 @@ function bindPipelineModeRadios() {
     el.addEventListener("change", () => {
       if (!el.checked) return;
       void setPipelineMode(el.value === "auto");
+    });
+  });
+}
+
+function updateContentStyleUi() {
+  document.querySelectorAll('input[name="contentStyle"]').forEach((el) => {
+    el.checked = el.value === state.contentStyle;
+  });
+}
+
+function bindContentStyleRadios() {
+  document.querySelectorAll('input[name="contentStyle"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      if (!el.checked) return;
+      state.contentStyle = el.value === "timelapse" ? "timelapse" : "standard";
+      updateContentStyleUi();
+      schedulePersist();
     });
   });
 }
@@ -890,12 +1055,13 @@ async function renderAdminTab() {
       </div>`;
 
     users.innerHTML = `
-      <p class="hint">Empty cap = unlimited. If no users appear, run <code>supabase/admin_rls_fix.sql</code> in Supabase.</p>
+      <p class="hint">New users are Pending until set Active. Empty cap = unlimited.</p>
       ${data.users.length === 0 ? `<p class="muted center">No users — run admin_rls_fix.sql to sync Auth accounts.</p>` : `
       <table class="admin-table admin-table-limits">
         <thead>
           <tr>
             <th>User</th>
+            <th>Status</th>
             <th>Today</th>
             <th>Month</th>
             <th>Daily $</th>
@@ -912,11 +1078,24 @@ async function renderAdminTab() {
                 (u.limits.dailyTokenLimit != null && u.today.totalTokens >= u.limits.dailyTokenLimit);
               const overMonth =
                 u.limits.monthlyBudgetUsd != null && u.month.totalCostUsd >= u.limits.monthlyBudgetUsd;
+              const statusClass =
+                u.accountStatus === "active"
+                  ? "status-active"
+                  : u.accountStatus === "pending"
+                    ? "status-pending"
+                    : "status-inactive";
               return `<tr data-user-id="${u.userId}" class="${overDaily || overMonth ? "over-limit" : ""}">
                 <td>
                   <strong>${escapeHtml(u.email || `${u.userId.slice(0, 8)}…`)}</strong>
                   ${u.isAdmin ? '<span class="admin-pill">admin</span>' : ""}
                   <div class="muted xs">${u.lastCallAt ? new Date(u.lastCallAt).toLocaleString() : "No calls"}</div>
+                </td>
+                <td>
+                  <select class="status-select ${statusClass}" data-field="accountStatus">
+                    <option value="pending" ${u.accountStatus === "pending" ? "selected" : ""}>Pending</option>
+                    <option value="active" ${u.accountStatus === "active" ? "selected" : ""}>Active</option>
+                    <option value="inactive" ${u.accountStatus === "inactive" ? "selected" : ""}>Inactive</option>
+                  </select>
                 </td>
                 <td class="tabular-nums">
                   ${adminFormatCost(u.today.totalCostUsd)}<br>
@@ -935,6 +1114,25 @@ async function renderAdminTab() {
             .join("")}
         </tbody>
       </table>`}`;
+
+    users.querySelectorAll(".status-select").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        const row = sel.closest("tr");
+        const userId = row?.dataset.userId;
+        if (!userId) return;
+        sel.disabled = true;
+        try {
+          await updateAdminUserStatus(userId, sel.value);
+          showStatus("Account status updated.", "ok");
+          void renderAdminTab();
+          void refreshAuthUi();
+        } catch (e) {
+          showStatus(e.message, "err");
+        } finally {
+          sel.disabled = false;
+        }
+      });
+    });
 
     users.querySelectorAll(".btn-save-limits").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -1299,7 +1497,7 @@ async function analyzeOneScene(sceneNumber) {
   renderScenes();
   try {
     await waitBeforeNextAnalyze();
-    const payload = await buildCloneAnalyzeRequest(s, state.frames);
+    const payload = await buildCloneAnalyzeRequest(s, state.frames, state.contentStyle);
     const json = await postAiJson(
       "/api/ai/veo-scene-analyze",
       {
@@ -1341,7 +1539,7 @@ async function generateOnePrompt(sceneNumber) {
   s.promptStatus = "loading";
   s.error = undefined;
   renderScenes();
-  const fullScript = buildCloneFullScript(state.scenes, state.duration);
+  const fullScript = buildCloneFullScript(state.scenes, state.duration, state.contentStyle);
   try {
     const data = await postAiJson("/api/ai/veo-scene-package", {
       fullScript,
@@ -1349,6 +1547,7 @@ async function generateOnePrompt(sceneNumber) {
       imageAnalysis: s.analysis,
       languageLabel: CLONE_LANGUAGE_LABEL,
       workflowMode: "clone",
+      contentStyle: state.contentStyle,
     });
     applyPromptApiResult(s, data);
     if (data.scenePackage) {
@@ -1386,7 +1585,7 @@ async function onGeneratePrompts() {
   setBusy(true);
   state.isGeneratingPrompts = true;
   renderPipelineBoard();
-  const fullScript = buildCloneFullScript(state.scenes, state.duration);
+  const fullScript = buildCloneFullScript(state.scenes, state.duration, state.contentStyle);
   const progress = $("#generateProgress");
   if (progress) {
     progress.classList.remove("hidden");
@@ -1408,6 +1607,7 @@ async function onGeneratePrompts() {
         imageAnalysis: s.analysis,
         languageLabel: CLONE_LANGUAGE_LABEL,
         workflowMode: "clone",
+        contentStyle: state.contentStyle,
       });
       applyPromptApiResult(s, data);
       if (data.scenePackage) {
@@ -1451,7 +1651,7 @@ async function onQueueAllFlow() {
       payload: buildFlowScenePayload(s),
     });
   }
-  showStatus(`${ready.length} scene(s) queued — check scenes, then Run selected scenes.`);
+  showStatus(`${ready.length} scene(s) queued in Supabase — open Flow queue tab to run.`);
   await refreshQueue();
   await setAllQueueSelected(true);
 }
@@ -1462,7 +1662,7 @@ async function onQueueAllFlow() {
 let queueSelectedIds = new Set();
 
 function queueItemId(q, idx = 0) {
-  return String(q.queuedAt ?? `scene-${q.sceneNumber ?? idx}`);
+  return String(q.id ?? q.queuedAt ?? `scene-${q.sceneNumber ?? idx}`);
 }
 
 async function saveQueueSelection() {
@@ -1707,7 +1907,8 @@ async function refreshQueue() {
   }
 
   if (!queue.length) {
-    $("#queueList").innerHTML = '<p class="muted">No scenes in queue.</p>';
+    $("#queueList").innerHTML =
+      '<p class="muted">No scenes in queue. Queue from the web app (Queue to DB) or Clone tab here — synced via Supabase.</p>';
     return;
   }
 
@@ -2256,6 +2457,7 @@ function bindUi() {
   });
 
   bindPipelineModeRadios();
+  bindContentStyleRadios();
 
   $("#btnExtract").addEventListener("click", () => void onExtract());
   $("#btnAutoBoundaries").addEventListener("click", () => {
@@ -2364,29 +2566,6 @@ function bindUi() {
     await refreshAuthUi();
   });
 
-  $("#btnSyncAuth").addEventListener("click", async () => {
-    const tabs = await chrome.tabs.query({});
-    const appTab = tabs.find(
-      (t) =>
-        t.url &&
-        (t.url.includes("localhost") ||
-          t.url.includes("127.0.0.1") ||
-          t.url.includes("vercel.app"))
-    );
-    if (!appTab?.id) {
-      const errEl = $("#authError");
-      errEl.textContent = "Open Video Flow in a browser tab first, then try again.";
-      errEl.classList.remove("hidden");
-      return;
-    }
-    try {
-      await chrome.tabs.sendMessage(appTab.id, { type: "VF_PUSH_AUTH" });
-    } catch {
-      /* content script may not be loaded */
-    }
-    setTimeout(() => void refreshAuthUi(), 600);
-  });
-
   $("#btnTestApi").addEventListener("click", async () => {
     $("#settingsStatus").textContent = "Testing…";
     try {
@@ -2417,6 +2596,7 @@ async function loadSettings() {
   $("#flowVideoMode").value = flow.videoMode ?? "Frames to Video";
   state.autoPipeline = flow.autoPipeline !== false;
   updatePipelineModeUi();
+  updateContentStyleUi();
   await renderFlowSettingsSummary();
 }
 
